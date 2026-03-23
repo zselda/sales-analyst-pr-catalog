@@ -24,6 +24,7 @@ from agents.quant_analyst import quant_analyst_agent
 from agents.verifier import verifier_agent, should_retry_or_continue
 from agents.network_mapper import network_mapper_agent
 from agents.strategist import sales_strategist_agent
+from agents.translator import translator_agent
 
 logger = logging.getLogger("swarm.graph")
 
@@ -98,3 +99,58 @@ def build_swarm_graph() -> StateGraph:
 
 # Pre-build the graph at module level
 swarm_graph = build_swarm_graph()
+
+
+def build_standalone_graph(generate_turkish: bool = False):
+    """
+    Build graph for standalone pipeline execution.
+
+    Adds an optional translator node after strategist when generate_turkish=True.
+
+    Architecture (with translation):
+      START → data_ingestion → quant_analyst → verifier
+                                                ↓ (conditional)
+                                  approved → network_mapper → strategist → translator → END
+                                  rejected → quant_analyst (loop back)
+
+    Architecture (without translation):
+      Same as build_swarm_graph() — strategist → END
+    """
+    builder = StateGraph(SwarmState)
+
+    # Nodes
+    builder.add_node("data_ingestion", data_ingestion_agent)
+    builder.add_node("quant_analyst", quant_analyst_agent)
+    builder.add_node("verifier", verifier_agent)
+    builder.add_node("network_mapper", network_mapper_agent)
+    builder.add_node("strategist", sales_strategist_agent)
+
+    # Sequential: START → data_ingestion → quant_analyst → verifier
+    builder.add_edge(START, "data_ingestion")
+    builder.add_edge("data_ingestion", "quant_analyst")
+    builder.add_edge("quant_analyst", "verifier")
+
+    # Verifier conditional
+    builder.add_conditional_edges(
+        "verifier",
+        _route_after_verification,
+        {
+            "network_mapper": "network_mapper",
+            "quant_analyst": "quant_analyst",
+        }
+    )
+
+    builder.add_edge("network_mapper", "strategist")
+
+    if generate_turkish:
+        builder.add_node("translator", translator_agent)
+        builder.add_edge("strategist", "translator")
+        builder.add_edge("translator", END)
+        logger.info("[Graph] Standalone graph compiled WITH translator (Turkish)")
+    else:
+        builder.add_edge("strategist", END)
+        logger.info("[Graph] Standalone graph compiled WITHOUT translator (English only)")
+
+    graph = builder.compile()
+    logger.info(f"[Graph] Standalone nodes: {list(builder.nodes.keys())}")
+    return graph
