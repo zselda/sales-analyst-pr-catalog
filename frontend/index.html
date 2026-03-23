@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Financial & Sales Analysis Platform — Command Center</title>
+    <meta name="description"
+        content="Multi-agent AI swarm for B2B financial analysis and commercial network visualization">
+
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+
+    <!-- Cytoscape.js for Network Graph -->
+    <script src="https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
+
+    <!-- Marked.js for Markdown rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <!-- ================================================================ -->
+    <!-- TOP BAR -->
+    <!-- ================================================================ -->
+    <header class="topbar">
+        <div class="topbar-left">
+            <div class="logo">
+                <span class="logo-icon">◆</span>
+                <h1>Financial & Sales Analysis Platform</h1>
+            </div>
+            <span class="badge">Multi-Agent System</span>
+        </div>
+        <div class="topbar-right">
+            <div class="eval-score-badge" id="evalScoreBadge" style="display:none;">
+                <span class="eval-label">Quality</span>
+                <span class="eval-value" id="evalScoreValue">—</span>
+            </div>
+            <div class="status-indicator" id="statusIndicator">
+                <span class="status-dot"></span>
+                <span class="status-text">Ready</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- ================================================================ -->
+    <!-- MAIN 3-PANE LAYOUT -->
+    <!-- ================================================================ -->
+    <main class="command-center">
+
+        <!-- ============================================================ -->
+        <!-- LEFT PANE: Input Controls -->
+        <!-- ============================================================ -->
+        <section class="pane pane-left">
+            <div class="pane-header">
+                <h2>🔍 Intelligence Input</h2>
+            </div>
+            <div class="pane-content">
+                <div class="form-group">
+                    <label for="taxId">Company Tax ID (VKN)</label>
+                    <input type="text" id="taxId" value="1234567890" placeholder="Enter Tax ID...">
+                    <span class="form-hint" id="companyHint">Upload Mizan to begin</span>
+                </div>
+
+                <!-- Excel Upload Zone -->
+                <div class="form-group">
+                    <label>Mizan Upload (.xlsx)</label>
+                    <div class="upload-zone" id="uploadZone" ondrop="handleFileDrop(event)"
+                        ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)">
+                        <input type="file" id="mizanFileInput" accept=".xlsx" style="display:none"
+                            onchange="handleFileSelect(event)">
+                        <div class="upload-content" id="uploadContent">
+                            <div class="upload-icon">📁</div>
+                            <p>Drag & drop <strong>.xlsx</strong> file here</p>
+                            <button class="btn btn-secondary btn-sm"
+                                onclick="document.getElementById('mizanFileInput').click()">
+                                Or browse files
+                            </button>
+                        </div>
+                        <div class="upload-status" id="uploadStatus" style="display:none;">
+                            <div class="upload-spinner" id="uploadSpinner"></div>
+                            <div class="upload-result" id="uploadResult"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Entity Summary (shown after upload) -->
+                <div class="entity-summary" id="entitySummary" style="display:none;">
+                    <div class="entity-row">
+                        <span class="entity-label">📊 Accounts</span>
+                        <span class="entity-value" id="accountCount">—</span>
+                    </div>
+                    <div class="entity-row">
+                        <span class="entity-label">🟢 Customers (120)</span>
+                        <span class="entity-value" id="customerCount">—</span>
+                    </div>
+                    <div class="entity-row">
+                        <span class="entity-label">🔴 Suppliers (320)</span>
+                        <span class="entity-value" id="supplierCount">—</span>
+                    </div>
+                    <div class="entity-row">
+                        <span class="entity-label">📋 Transactions</span>
+                        <span class="entity-value">
+                            <span id="txnCount">—</span>
+                            <input type="file" id="txnFileInput" accept=".xlsx,.csv" style="display:none;"
+                                onchange="uploadTransactions(this.files[0])">
+                            <button id="btnUploadTxn" class="btn-generate-txn"
+                                onclick="document.getElementById('txnFileInput').click()"
+                                style="display:none;">Upload</button>
+                        </span>
+                    </div>
+                </div>
+
+                <!-- Data Preview -->
+                <div class="data-preview" id="dataPreview">
+                    <div class="preview-badge" id="previewBadge">No data loaded</div>
+                    <div class="preview-table-wrapper" id="previewTableWrapper" style="display:none;">
+                        <table id="previewTable">
+                            <thead id="previewHead"></thead>
+                            <tbody id="previewBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Run Button -->
+                <div class="form-group">
+                    <button class="btn btn-primary btn-glow" id="btnRunSwarm" onclick="runSwarm()">
+                        <span class="btn-icon">🚀</span>
+                        Run Intelligence Swarm
+                    </button>
+                </div>
+
+                <!-- Agent Metrics Panel -->
+                <div class="metrics-panel" id="metricsPanel" style="display:none;">
+                    <div class="metrics-header">⚡ Agent Metrics</div>
+                    <div class="metrics-body" id="metricsBody"></div>
+                </div>
+
+                <!-- Agent Status Log -->
+                <div class="agent-log" id="agentLog">
+                    <div class="log-header">Agent Activity</div>
+                    <div class="log-entries" id="logEntries">
+                        <div class="log-entry idle">Awaiting instructions...</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- CENTER PANE: Network Graph Visualiser -->
+        <!-- ============================================================ -->
+        <section class="pane pane-center">
+            <div class="pane-header">
+                <h2>🌐 Commercial Network</h2>
+                <div class="graph-legend">
+                    <span class="legend-item"><span class="dot" style="background:#FFD700"></span>Target</span>
+                    <span class="legend-item"><span class="dot" style="background:#4CAF50"></span>Customers</span>
+                    <span class="legend-item"><span class="dot" style="background:#F44336"></span>Suppliers</span>
+                    <span class="legend-item"><span class="dot" style="background:#2196F3"></span>Banks</span>
+                </div>
+            </div>
+            <div class="pane-content graph-container">
+                <div id="cyGraph" class="cy-graph">
+                    <div class="graph-placeholder" id="graphPlaceholder">
+                        <div class="placeholder-icon">◇</div>
+                        <p>Run the swarm to visualize<br>the commercial network</p>
+                    </div>
+                </div>
+                <!-- Node Detail Tooltip -->
+                <div class="node-detail" id="nodeDetail" style="display:none;">
+                    <h4 id="nodeDetailName"></h4>
+                    <div id="nodeDetailInfo"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Resize Handle (between center & right pane) -->
+        <div class="resize-handle" id="resizeHandle" title="Drag to resize">
+            <div class="resize-handle-grip"></div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- RIGHT PANE: Strategy Report & Chat -->
+        <!-- ============================================================ -->
+        <section class="pane pane-right">
+            <div class="pane-header">
+                <h2>📈 Strategy & Intelligence</h2>
+                <div class="pane-tabs">
+                    <button class="tab active" onclick="switchTab('report')">Report</button>
+                    <button class="tab" onclick="switchTab('metrics')">Metrics</button>
+                    <button class="tab" onclick="switchTab('chat')">Chat</button>
+                    <button class="btn-pdf" id="btnDownloadPdf" onclick="downloadPDF()" style="display:none;">
+                        📄 Download PDF
+                    </button>
+                </div>
+            </div>
+            <div class="pane-content">
+                <!-- Report Tab -->
+                <div class="tab-content active" id="tabReport">
+                    <div class="report-container" id="reportContainer">
+                        <div class="report-placeholder">
+                            <div class="placeholder-icon">📄</div>
+                            <p>Strategic report will appear here<br>after the swarm analysis completes.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Metrics Tab -->
+                <div class="tab-content" id="tabMetrics">
+                    <div class="report-container" id="metricsContainer">
+                        <div class="report-placeholder">
+                            <div class="placeholder-icon">📊</div>
+                            <p>Pipeline metrics & evaluation scores<br>will appear here after analysis.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Chat Tab -->
+                <div class="tab-content" id="tabChat">
+                    <div class="chat-messages" id="chatMessages">
+                        <div class="chat-msg bot">
+                            <div class="chat-avatar">🤖</div>
+                            <div class="chat-bubble">
+                                Welcome! Run the Intelligence Swarm first, then ask me questions about the analysis.
+                                Try: "What is the total exposure to suppliers?" or "Show competitor bank activity"
+                            </div>
+                        </div>
+                    </div>
+                    <div class="chat-input-area">
+                        <input type="text" id="chatInput" placeholder="Ask about the analysis..."
+                            onkeydown="if(event.key==='Enter')sendChat()">
+                        <button class="btn btn-chat" onclick="sendChat()">➤</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <script src="app.js?v=2"></script>
+</body>
+
+</html>
