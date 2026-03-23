@@ -133,11 +133,18 @@ def run_pipeline(file_path: str, generate_turkish: bool = False, output_dir: str
 
     # HTML report (always English)
     logger.info("[6/7] Generating HTML report...")
-    html_content = generate_report_html(result)
+    html_content = generate_report_html(result, language="EN")
     html_path = os.path.join(output_dir, f"{safe_name}_Report.html")
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html_content)
-    logger.info(f"  HTML: {html_path}")
+    logger.info(f"  EN HTML: {html_path}")
+    
+    if generate_turkish:
+        tr_html_content = generate_report_html(result, language="TR")
+        tr_html_path = os.path.join(output_dir, f"{safe_name}_Report_TR.html")
+        with open(tr_html_path, "w", encoding="utf-8") as f:
+            f.write(tr_html_content)
+        logger.info(f"  TR HTML: {tr_html_path}")
 
     # PDF reports
     logger.info("[7/7] Generating PDF reports...")

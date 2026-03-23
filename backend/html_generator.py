@@ -124,17 +124,19 @@ def _inline_md(text: str) -> str:
     return text
 
 
-def generate_report_html(result: dict) -> str:
+def generate_report_html(result: dict, language: str = "EN") -> str:
     """
     Generate a self-contained ING-branded HTML report.
 
     Args:
         result: The full pipeline result dict containing:
             - strategy_report (markdown)
+            - translated_report (markdown)
             - financial_ratios
             - network_data
             - company_name
             - tax_id
+        language: "EN" or "TR"
 
     Returns:
         str: Complete HTML document as string
@@ -142,10 +144,15 @@ def generate_report_html(result: dict) -> str:
     company_name = result.get("company_name", "Company")
     tax_id = result.get("tax_id", "1234567890")
     report_date = datetime.now().strftime("%d %B %Y")
-    strategy_report = result.get("strategy_report", "")
+    
+    # Select the report content based on requested language
+    if language == "TR":
+        report_content = result.get("translated_report") or result.get("strategy_report", "")
+    else:
+        report_content = result.get("strategy_report", "")
 
     # Convert report markdown to HTML body
-    report_body = _md_to_html_body(strategy_report) if strategy_report else "<p>No report available.</p>"
+    report_body = _md_to_html_body(report_content) if report_content else "<p>No report available.</p>"
 
     # Build KPI summary from ratios
     ratios = result.get("financial_ratios", {})
