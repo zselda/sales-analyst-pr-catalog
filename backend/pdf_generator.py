@@ -244,8 +244,12 @@ class _INGPageTemplate:
 
         canvas_obj.setFillColor(ING_WHITE)
         canvas_obj.setFont(FONT_REGULAR, 7)
-        canvas_obj.drawString(15 * mm, 3.5 * mm,
-                              f'Financial & Sales Analysis Platform — {datetime.now().strftime("%d %B %Y")}')
+        footer_label = (
+            f'Finansal & Satış Analiz Platformu — {datetime.now().strftime("%d %B %Y")}'
+            if hasattr(doc, '_ing_language') and doc._ing_language == 'TR'
+            else f'Financial & Sales Analysis Platform — {datetime.now().strftime("%d %B %Y")}'
+        )
+        canvas_obj.drawString(15 * mm, 3.5 * mm, footer_label)
         canvas_obj.drawRightString(w - 15 * mm, 3.5 * mm, f'Page {doc.page}')
 
         # ── Thin orange accent line under header ──
@@ -455,6 +459,7 @@ def generate_report_pdf(result: dict, language: str = "EN") -> bytes:
         )
 
     page_template = _INGPageTemplate(page_title)
+    doc._ing_language = language  # Pass language to page template for footer
 
     # ====================================================================
     # PAGE 1: Cover / Executive Summary
@@ -475,21 +480,48 @@ def generate_report_pdf(result: dict, language: str = "EN") -> bytes:
 
     # Summary cards table
     gm = ratios.get('gross_margin', {}).get('value', '—')
+    om = ratios.get('operating_margin', {}).get('value', '—')
     cr = ratios.get('current_ratio', {}).get('value', '—')
+    qr = ratios.get('quick_ratio', {}).get('value', '—')
     dte = ratios.get('debt_to_equity', {}).get('value', '—')
+    bdr = ratios.get('bank_debt_ratio', {}).get('value', '—')
+    colp = ratios.get('collection_period', {}).get('value', '—')
+    payp = ratios.get('payment_period', {}).get('value', '—')
     fer = ratios.get('financial_expense_ratio', {}).get('value', '—')
     pcr = ratios.get('pos_commission_ratio', {}).get('value', '—')
 
-    summary_data = [
-        [Paragraph('<b>Metric</b>', styles['INGH3White']),
-         Paragraph('<b>Value</b>', styles['INGH3White']),
-         Paragraph('<b>Assessment</b>', styles['INGH3White'])],
-        ['Gross Margin', f'{gm}%', 'Healthy' if isinstance(gm, (int, float)) and gm > 25 else 'Low'],
-        ['Current Ratio', f'{cr}x', 'Strong' if isinstance(cr, (int, float)) and cr > 1.5 else 'Tight'],
-        ['Debt-to-Equity', f'{dte}x', 'Conservative' if isinstance(dte, (int, float)) and dte < 2 else 'Leveraged'],
-        ['Financial Expense', f'{fer}%', 'High' if isinstance(fer, (int, float)) and fer > 3 else 'Normal'],
-        ['POS Commission', f'{pcr}%', 'Excessive' if isinstance(pcr, (int, float)) and pcr > 1 else 'Normal'],
-    ]
+    if language == "TR":
+        summary_data = [
+            [Paragraph('<b>Gösterge</b>', styles['INGH3White']),
+             Paragraph('<b>Değer</b>', styles['INGH3White']),
+             Paragraph('<b>Değerlendirme</b>', styles['INGH3White'])],
+            ['Brüt Kâr Marjı', f'{gm}%', 'Sağlıklı' if isinstance(gm, (int, float)) and gm > 25 else 'Düşük'],
+            ['Faaliyet Kâr Marjı', f'{om}%', 'Sağlıklı' if isinstance(om, (int, float)) and om > 10 else 'Gözden Geçirilmeli'],
+            ['Cari Oran', f'{cr}x', 'Güçlü' if isinstance(cr, (int, float)) and cr > 1.5 else 'Dar'],
+            ['Asit Test Oranı', f'{qr}x', 'Optimum' if isinstance(qr, (int, float)) and qr > 1.0 else 'Düşük'],
+            ['Borç/Özkaynak Oranı', f'{dte}x', 'Muhafazakâr' if isinstance(dte, (int, float)) and dte < 2 else 'Kaldıraçlı'],
+            ['Banka Borç Oranı', f'{bdr}%', 'Düşük' if isinstance(bdr, (int, float)) and bdr < 20 else 'Yüksek'],
+            ['Tahsilat Süresi', f'{colp} gün', 'Hızlı' if isinstance(colp, (int, float)) and colp < 60 else 'Yavaş'],
+            ['Ödeme Süresi', f'{payp} gün', 'Uzun' if isinstance(payp, (int, float)) and payp > 60 else 'Kısa'],
+            ['Finansman Gider Oranı', f'{fer}%', 'Yüksek' if isinstance(fer, (int, float)) and fer > 3 else 'Normal'],
+            ['POS Komisyon Oranı', f'{pcr}%', 'Aşırı' if isinstance(pcr, (int, float)) and pcr > 1 else 'Normal'],
+        ]
+    else:
+        summary_data = [
+            [Paragraph('<b>Metric</b>', styles['INGH3White']),
+             Paragraph('<b>Value</b>', styles['INGH3White']),
+             Paragraph('<b>Assessment</b>', styles['INGH3White'])],
+            ['Gross Margin', f'{gm}%', 'Healthy' if isinstance(gm, (int, float)) and gm > 25 else 'Low'],
+            ['Operating Margin', f'{om}%', 'Healthy' if isinstance(om, (int, float)) and om > 10 else 'Review'],
+            ['Current Ratio', f'{cr}x', 'Strong' if isinstance(cr, (int, float)) and cr > 1.5 else 'Tight'],
+            ['Quick Ratio', f'{qr}x', 'Optimum' if isinstance(qr, (int, float)) and qr > 1.0 else 'Low'],
+            ['Debt-to-Equity', f'{dte}x', 'Conservative' if isinstance(dte, (int, float)) and dte < 2 else 'Leveraged'],
+            ['Bank Debt Ratio', f'{bdr}%', 'Low' if isinstance(bdr, (int, float)) and bdr < 20 else 'High'],
+            ['Collection Period', f'{colp} days', 'Fast' if isinstance(colp, (int, float)) and colp < 60 else 'Slow'],
+            ['Payment Period', f'{payp} days', 'Long' if isinstance(payp, (int, float)) and payp > 60 else 'Short'],
+            ['Financial Expense', f'{fer}%', 'High' if isinstance(fer, (int, float)) and fer > 3 else 'Normal'],
+            ['POS Commission', f'{pcr}%', 'Excessive' if isinstance(pcr, (int, float)) and pcr > 1 else 'Normal'],
+        ]
 
     # Convert non-Paragraph cells to Paragraphs
     for ri in range(1, len(summary_data)):
@@ -516,7 +548,10 @@ def generate_report_pdf(result: dict, language: str = "EN") -> bytes:
         ('BOTTOMPADDING', (0, 1), (-1, -1), 5),
     ]))
 
-    story.append(Paragraph("Executive Summary", styles['INGH1']))
+    story.append(Paragraph(
+        "Yönetici Özeti" if language == "TR" else "Executive Summary",
+        styles['INGH1']
+    ))
     story.append(summary_table)
     story.append(Spacer(1, 4))
 
@@ -524,19 +559,33 @@ def generate_report_pdf(result: dict, language: str = "EN") -> bytes:
     network = result.get('network_data', {})
     ns = network.get('stats', {})
     if ns:
-        story.append(Paragraph("Commercial Network Overview", styles['INGH2']))
-        net_data = [
-            [Paragraph('<b>Receivables</b>', styles['INGH3White']),
-             Paragraph('<b>Payables</b>', styles['INGH3White']),
-             Paragraph('<b>Customers</b>', styles['INGH3White']),
-             Paragraph('<b>Suppliers</b>', styles['INGH3White']),
-             Paragraph('<b>Banks</b>', styles['INGH3White'])],
+        story.append(Paragraph(
+            "Ticari Ağ Görünümü" if language == "TR" else "Commercial Network Overview",
+            styles['INGH2']
+        ))
+        if language == "TR":
+            net_data = [
+                [Paragraph('<b>Alacaklar</b>', styles['INGH3White']),
+                 Paragraph('<b>Borçlar</b>', styles['INGH3White']),
+                 Paragraph('<b>Müşteriler</b>', styles['INGH3White']),
+                 Paragraph('<b>Tedarikçiler</b>', styles['INGH3White']),
+                 Paragraph('<b>Bankalar</b>', styles['INGH3White'])],
+            ]
+        else:
+            net_data = [
+                [Paragraph('<b>Receivables</b>', styles['INGH3White']),
+                 Paragraph('<b>Payables</b>', styles['INGH3White']),
+                 Paragraph('<b>Customers</b>', styles['INGH3White']),
+                 Paragraph('<b>Suppliers</b>', styles['INGH3White']),
+                 Paragraph('<b>Banks</b>', styles['INGH3White'])],
+            ]
+        net_data.append(
             [Paragraph(f"{ns.get('total_receivables', 0):,.0f} TL", styles['INGSmall']),
              Paragraph(f"{ns.get('total_payables', 0):,.0f} TL", styles['INGSmall']),
              Paragraph(str(ns.get('customer_count', 0)), styles['INGSmall']),
              Paragraph(str(ns.get('supplier_count', 0)), styles['INGSmall']),
              Paragraph(str(ns.get('bank_count', 0)), styles['INGSmall'])],
-        ]
+        )
         net_table = Table(net_data, colWidths=[36 * mm] * 5)
         net_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), ING_NAVY),
