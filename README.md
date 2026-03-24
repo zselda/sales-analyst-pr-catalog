@@ -37,8 +37,8 @@ Ensure you have Python 3.10+ installed.
 
 ```bash
 # Clone the repository
-git clone https://github.com/zselda/financial-intelligence-platformV1.git
-cd financial-intelligence-platformV1/backend
+git clone https://github.com/zselda/sales-analyst-mizan.git
+cd sales-analyst-mizan/backend
 
 # Install dependencies
 pip install -r requirements.txt
