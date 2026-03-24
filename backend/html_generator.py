@@ -157,7 +157,7 @@ def generate_report_html(result: dict, language: str = "EN") -> str:
     # Build KPI summary from ratios
     ratios = result.get("financial_ratios", {})
     kpi_rows = ""
-    kpi_items = [
+    kpi_items_en = [
         ("Gross Margin", "gross_margin", "%"),
         ("Operating Margin", "operating_margin", "%"),
         ("Current Ratio", "current_ratio", "x"),
@@ -169,6 +169,19 @@ def generate_report_html(result: dict, language: str = "EN") -> str:
         ("Fin. Expense Ratio", "financial_expense_ratio", "%"),
         ("POS Commission", "pos_commission_ratio", "%"),
     ]
+    kpi_items_tr = [
+        ("Brüt Kâr Marjı", "gross_margin", "%"),
+        ("Faaliyet Kâr Marjı", "operating_margin", "%"),
+        ("Cari Oran", "current_ratio", "x"),
+        ("Asit Test Oranı", "quick_ratio", "x"),
+        ("Borç/Özkaynak Oranı", "debt_to_equity", "x"),
+        ("Banka Borç Oranı", "bank_debt_ratio", "%"),
+        ("Tahsilat Süresi", "collection_period", " gün"),
+        ("Ödeme Süresi", "payment_period", " gün"),
+        ("Finansman Gider Oranı", "financial_expense_ratio", "%"),
+        ("POS Komisyon Oranı", "pos_commission_ratio", "%"),
+    ]
+    kpi_items = kpi_items_tr if language == "TR" else kpi_items_en
     for label, key, unit in kpi_items:
         val = ratios.get(key, {}).get("value", "—")
         kpi_rows += f"<tr><td>{label}</td><td>{val}{unit}</td></tr>\n"
@@ -181,8 +194,38 @@ def generate_report_html(result: dict, language: str = "EN") -> str:
     net_cust = ns.get("customer_count", 0) if ns else "—"
     net_supp = ns.get("supplier_count", 0) if ns else "—"
 
+    # Localized UI labels
+    if language == "TR":
+        html_lang = "tr"
+        header_title = "Finansal &amp; Satış Analiz Raporu"
+        badge_text = "GİZLİ"
+        meta_company = "Firma"
+        meta_taxid = "Vergi No"
+        meta_date = "Tarih"
+        meta_platform = "Platform"
+        kpi_title = "📊 Temel Performans Göstergeleri"
+        net_recv_label = "Toplam Alacaklar"
+        net_pay_label = "Toplam Borçlar"
+        net_cust_label = "Müşteriler"
+        net_supp_label = "Tedarikçiler"
+        footer_text = f"Finansal &amp; Satış Analiz Platformu — {report_date} — Bu belge gizlidir ve yalnızca kurum içi kullanım amaçlıdır."
+    else:
+        html_lang = "en"
+        header_title = "Financial &amp; Sales Analysis Report"
+        badge_text = "CONFIDENTIAL"
+        meta_company = "Company"
+        meta_taxid = "Tax ID"
+        meta_date = "Date"
+        meta_platform = "Platform"
+        kpi_title = "📊 Key Performance Indicators"
+        net_recv_label = "Total Receivables"
+        net_pay_label = "Total Payables"
+        net_cust_label = "Customers"
+        net_supp_label = "Suppliers"
+        footer_text = f"Financial &amp; Sales Analysis Platform — {report_date} — This document is confidential and intended for internal use only."
+
     html = f"""<!DOCTYPE html>
-<html lang="en">
+<html lang="{html_lang}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -398,21 +441,21 @@ def generate_report_html(result: dict, language: str = "EN") -> str:
 <body>
 
 <div class="header">
-    <h1>Financial &amp; Sales Analysis Report</h1>
-    <span class="badge">CONFIDENTIAL</span>
+    <h1>{header_title}</h1>
+    <span class="badge">{badge_text}</span>
 </div>
 
 <div class="meta-bar">
-    <span><strong>Company:</strong> {company_name}</span>
-    <span><strong>Tax ID:</strong> {tax_id}</span>
-    <span><strong>Date:</strong> {report_date}</span>
-    <span><strong>Platform:</strong> Financial Intelligence Platform</span>
+    <span><strong>{meta_company}:</strong> {company_name}</span>
+    <span><strong>{meta_taxid}:</strong> {tax_id}</span>
+    <span><strong>{meta_date}:</strong> {report_date}</span>
+    <span><strong>{meta_platform}:</strong> Financial Intelligence Platform</span>
 </div>
 
 <div class="container">
 
     <div class="kpi-section">
-        <h2 style="color: var(--ing-navy); margin-bottom: 10px;">📊 Key Performance Indicators</h2>
+        <h2 style="color: var(--ing-navy); margin-bottom: 10px;">{kpi_title}</h2>
         <div class="kpi-grid">
             <table>
                 {kpi_rows}
@@ -422,19 +465,19 @@ def generate_report_html(result: dict, language: str = "EN") -> str:
 
     <div class="network-bar">
         <div class="net-card">
-            <div class="label">Total Receivables</div>
+            <div class="label">{net_recv_label}</div>
             <div class="value">{net_recv}</div>
         </div>
         <div class="net-card">
-            <div class="label">Total Payables</div>
+            <div class="label">{net_pay_label}</div>
             <div class="value">{net_pay}</div>
         </div>
         <div class="net-card">
-            <div class="label">Customers</div>
+            <div class="label">{net_cust_label}</div>
             <div class="value">{net_cust}</div>
         </div>
         <div class="net-card">
-            <div class="label">Suppliers</div>
+            <div class="label">{net_supp_label}</div>
             <div class="value">{net_supp}</div>
         </div>
     </div>
@@ -446,7 +489,7 @@ def generate_report_html(result: dict, language: str = "EN") -> str:
 </div>
 
 <div class="footer">
-    Financial &amp; Sales Analysis Platform — {report_date} — This document is confidential and intended for internal use only.
+    {footer_text}
 </div>
 
 </body>
