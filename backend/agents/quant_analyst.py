@@ -2,121 +2,226 @@
 Agent 2: Quantitative Analyst — Local calc + LLM interpretation
 
 Refactored to use BaseAgent for tracing and error isolation.
-All raw_values include hesap_kodu_aciklama (account code + Turkish description)
-to ensure every number is properly cited.
+
+DYNAMIC MAPPING: Account code descriptions (hesap_kodu_aciklama) are
+extracted dynamically from each Mizan document — no hardcoded dictionaries.
+
+HIERARCHICAL AGGREGATION: Balances roll up from leaf nodes to parents
+using prefix-based tree structure. Both period movement (borc/alacak)
+and closing balance (borc_bakiye/alacak_bakiye) are computed.
 """
 
 import logging
 import pandas as pd
+from collections import defaultdict
 from agents.base import BaseAgent
 from llm_config import invoke_llm, QUANT_ANALYST_SYSTEM_PROMPT
 
 logger = logging.getLogger("swarm.agents.quant_analyst")
 
-# ── Turkish Chart of Accounts (Tekdüzen Hesap Planı) ──
-HESAP_KODU_ACIKLAMA = {
-    "100": "KASA",
-    "101": "ALINAN ÇEKLER",
-    "102": "BANKALAR",
-    "103": "VERİLEN ÇEKLER VE ÖDEME EMİRLERİ",
-    "108": "DİĞER HAZIR DEĞERLER",
-    "120": "ALICILAR",
-    "121": "ALACAK SENETLERİ",
-    "126": "VERİLEN DEPOZİTO VE TEMİNATLAR",
-    "150": "İLK MADDE VE MALZEME",
-    "151": "YARI MAMULLER - ÜRETİM",
-    "152": "MAMULLER",
-    "153": "TİCARİ MALLAR",
-    "159": "VERİLEN SİPARİŞ AVANSLARI",
-    "180": "GELECEK AYLARA AİT GİDERLER",
-    "190": "İNDİRİLECEK KDV",
-    "191": "İNDİRİLECEK KDV",
-    "196": "PEŞİN ÖDENEN VERGİLER VE FONLAR",
-    "240": "İŞTİRAKLERE SERMAYE TAAHHÜTLERİ",
-    "242": "İŞTİRAKLER",
-    "252": "BİNALAR",
-    "253": "TESİS, MAKİNE VE CİHAZLAR",
-    "254": "TAŞITLAR",
-    "255": "DEMİRBAŞLAR",
-    "257": "BİRİKMİŞ AMORTİSMANLAR (-)",
-    "260": "HAKLAR",
-    "264": "ÖZEL MALİYETLER",
-    "268": "BİRİKMİŞ AMORTİSMANLAR (-)",
-    "300": "BANKA KREDİLERİ",
-    "303": "UZUN VADELİ KREDİLERİN ANAPARA TAKSİTLERİ VE FAİZLERİ",
-    "309": "DİĞER MALİ BORÇLAR",
-    "320": "SATICILAR",
-    "321": "BORÇ SENETLERİ",
-    "335": "PERSONELE BORÇLAR",
-    "336": "DİĞER ÇEŞİTLİ BORÇLAR",
-    "340": "ALINAN SİPARİŞ AVANSLARI",
-    "360": "ÖDENECEK VERGİ VE FONLAR",
-    "361": "ÖDENECEK SOSYAL GÜVENLİK KESİNTİLERİ",
-    "380": "GELECEK AYLARA AİT GELİRLER",
-    "391": "HESAPLANAN KDV",
-    "400": "BANKA KREDİLERİ",
-    "420": "SATICILAR",
-    "429": "DİĞER TİCARİ BORÇLAR",
-    "431": "ORTAKLARA BORÇLAR",
-    "440": "ALINAN SİPARİŞ AVANSLARI (UV)",
-    "472": "KIDEM TAZMİNATI KARŞILIĞI",
-    "500": "SERMAYE",
-    "520": "HİSSE SENETLERİ İHRAÇ PRİMLERİ",
-    "540": "YASAL YEDEKLER",
-    "570": "GEÇMİŞ YILLAR KÂRLARI",
-    "580": "GEÇMİŞ YILLAR ZARARLARI (-)",
-    "590": "DÖNEM NET KÂRI",
-    "591": "DÖNEM NET ZARARI (-)",
-    "600": "YURTİÇİ SATIŞLAR",
-    "601": "YURTDIŞI SATIŞLAR",
-    "610": "SATIŞ İNDİRİMLERİ (-)",
-    "611": "SATIŞ İSKONTOLARI (-)",
-    "612": "DİĞER İNDİRİMLER (-)",
-    "620": "SATILAN MALIN MALİYETİ (-)",
-    "621": "SATILAN HİZMET MALİYETİ (-)",
-    "630": "ARAŞTIRMA VE GELİŞTİRME GİDERLERİ (-)",
-    "631": "PAZARLAMA, SATIŞ VE DAĞITIM GİDERLERİ (-)",
-    "632": "GENEL YÖNETİM GİDERLERİ (-)",
-    "640": "İŞTİRAKLERDEN TEMETTÜ GELİRLERİ",
-    "642": "FAİZ GELİRLERİ",
-    "644": "KONUSUKALMAMIŞPROVİZYON KARŞILIĞI",
-    "646": "KAMBİYO KÂRLARI",
-    "647": "REESKONT FAİZ GELİRLERİ",
-    "648": "ENFLASYON DÜZELTME KÂRLARI",
-    "649": "DİĞER OLAĞAN GELİR VE KÂRLAR",
-    "653": "KOMİSYON GİDERLERİ (-)",
-    "654": "KARŞILIK GİDERLERİ (-)",
-    "655": "TÜM DİĞER İNDİRİM VE GİDERLER (-)",
-    "656": "KAMBİYO ZARARLARI (-)",
-    "657": "REESKONT FAİZ GİDERLERİ (-)",
-    "658": "ENFLASYON DÜZELTME ZARARLARI (-)",
-    "659": "DİĞER OLAĞAN GİDER VE ZARARLAR (-)",
-    "660": "KISA VADELİ BORÇLANMA GİDERLERİ (-)",
-    "661": "UZUN VADELİ BORÇLANMA GİDERLERİ (-)",
-    "679": "DİĞER OLAĞANDIŞI GELİR VE KÂRLAR",
-    "680": "ÇALIŞILMAYAN KISIM GİDER VE ZARARLARI (-)",
-    "681": "ÖNCEKİ DÖNEM GİDER VE ZARARLARI (-)",
-    "689": "DİĞER OLAĞANDIŞI GİDER VE ZARARLAR (-)",
-    "691": "DÖNEM KÂRI VEYA ZARARI (-)",
-    "780": "FİNANSMAN GİDERLERİ",
-    "780.01": "POS KOMİSYON GİDERLERİ",
-}
+
+# ── Dynamic Mapping & Hierarchy Functions ──────────────────────────
 
 
-def _get_aciklama(code: str) -> str:
-    """Get the Turkish description for an account code."""
-    if code in HESAP_KODU_ACIKLAMA:
-        return HESAP_KODU_ACIKLAMA[code]
-    # Try prefix matching for compound codes
-    prefix = code.split(".")[0]
-    if prefix in HESAP_KODU_ACIKLAMA:
-        return HESAP_KODU_ACIKLAMA[prefix]
-    return f"HESAP {code}"
+def _build_dynamic_mapping(df: pd.DataFrame) -> dict:
+    """
+    Build hesap_kodu -> hesap_kodu_aciklama mapping dynamically
+    from the actual Mizan document data.
+
+    This replaces ANY hardcoded/static dictionary. Every document
+    will produce its own mapping reflecting exactly what it contains.
+    """
+    mapping = {}
+    for _, row in df.iterrows():
+        code = str(row.get("account_code", "")).strip()
+        name = str(row.get("account_name", "")).strip()
+        if code and name and name != "nan":
+            mapping[code] = name
+    logger.info(f"Built dynamic mapping: {len(mapping)} account codes")
+    return mapping
+
+
+def _build_hierarchy_tree(df: pd.DataFrame) -> dict:
+    """
+    Build a hierarchical tree from account codes using '.' delimiter.
+
+    Returns a dict keyed by root codes, each containing:
+    {
+        "code": "101",
+        "name": "ALINAN ÇEKLER",
+        "children": {
+            "101.010": {
+                "code": "101.010",
+                "name": "ALINAN ÇEKLER",
+                "children": {
+                    "101.010.001": {..., "children": {}, "is_leaf": True},
+                    "101.010.002": {..., "children": {}, "is_leaf": True},
+                }
+            }
+        }
+    }
+    """
+    tree = {}
+    all_codes = sorted(df["account_code"].astype(str).unique())
+
+    for code in all_codes:
+        parts = code.split(".")
+        name_row = df[df["account_code"] == code]
+        name = str(name_row.iloc[0].get("account_name", code)) if not name_row.empty else code
+
+        # Navigate/create path in tree
+        current_level = tree
+        accumulated = ""
+        for i, part in enumerate(parts):
+            accumulated = part if i == 0 else f"{accumulated}.{part}"
+            if accumulated not in current_level:
+                current_level[accumulated] = {
+                    "code": accumulated,
+                    "name": name if accumulated == code else "",
+                    "children": {},
+                    "is_leaf": False,
+                }
+            if accumulated == code:
+                current_level[accumulated]["name"] = name
+            current_level = current_level[accumulated]["children"]
+
+    # Mark leaf nodes (no children)
+    def _mark_leaves(node_dict):
+        for key, node in node_dict.items():
+            if not node["children"]:
+                node["is_leaf"] = True
+            else:
+                _mark_leaves(node["children"])
+
+    _mark_leaves(tree)
+    return tree
+
+
+def _get_leaf_codes(tree_node: dict) -> list:
+    """Recursively collect all leaf codes under a tree node."""
+    leaves = []
+    children = tree_node.get("children", {})
+    if not children:
+        return [tree_node["code"]]
+    for child in children.values():
+        leaves.extend(_get_leaf_codes(child))
+    return leaves
+
+
+def _aggregate_hierarchy(df: pd.DataFrame, code: str, tree: dict,
+                         col_borc="debit", col_alacak="credit",
+                         col_borc_bakiye="balance_debit",
+                         col_alacak_bakiye="balance_credit") -> dict:
+    """
+    Compute aggregated balances for a code using hierarchical leaf-node summation.
+
+    Returns:
+        {
+            "period_borc": float,     # sum of borc (debit) from leaves
+            "period_alacak": float,   # sum of alacak (credit) from leaves
+            "period_movement": float, # borc - alacak
+            "closing_borc_bakiye": float,
+            "closing_alacak_bakiye": float,
+            "closing_balance": float, # borc_bakiye - alacak_bakiye
+            "leaf_count": int,
+            "leaf_codes": list,
+            "reported_value": float | None,  # from parent row if exists
+            "validation_status": str,  # "match", "mismatch", "no_parent_row"
+        }
+    """
+    # Find this code's node in the tree
+    node = _find_node_in_tree(code, tree)
+
+    if node is None:
+        # Code not in tree — try direct DataFrame lookup
+        m = df[df["account_code"] == code]
+        if not m.empty:
+            row = m.iloc[0]
+            borc = float(row.get(col_borc, 0))
+            alacak = float(row.get(col_alacak, 0))
+            b_bak = float(row.get(col_borc_bakiye, 0))
+            a_bak = float(row.get(col_alacak_bakiye, 0))
+            return {
+                "period_borc": borc, "period_alacak": alacak,
+                "period_movement": borc - alacak,
+                "closing_borc_bakiye": b_bak, "closing_alacak_bakiye": a_bak,
+                "closing_balance": b_bak - a_bak,
+                "leaf_count": 1, "leaf_codes": [code],
+                "reported_value": None, "validation_status": "leaf_direct",
+            }
+        return {
+            "period_borc": 0, "period_alacak": 0, "period_movement": 0,
+            "closing_borc_bakiye": 0, "closing_alacak_bakiye": 0,
+            "closing_balance": 0,
+            "leaf_count": 0, "leaf_codes": [],
+            "reported_value": None, "validation_status": "not_found",
+        }
+
+    # Collect leaf codes
+    leaf_codes = _get_leaf_codes(node)
+
+    if not leaf_codes:
+        leaf_codes = [code]
+
+    # Sum from leaf nodes
+    leaf_df = df[df["account_code"].isin(leaf_codes)]
+    period_borc = float(leaf_df[col_borc].sum()) if col_borc in leaf_df.columns else 0
+    period_alacak = float(leaf_df[col_alacak].sum()) if col_alacak in leaf_df.columns else 0
+    closing_b = float(leaf_df[col_borc_bakiye].sum()) if col_borc_bakiye in leaf_df.columns else 0
+    closing_a = float(leaf_df[col_alacak_bakiye].sum()) if col_alacak_bakiye in leaf_df.columns else 0
+
+    # Cross-validate against parent row if it exists
+    parent_row = df[df["account_code"] == code]
+    reported_value = None
+    validation_status = "no_parent_row"
+
+    if not parent_row.empty and len(leaf_codes) > 1:
+        # Parent row exists and has children — validate
+        rep_borc = float(parent_row.iloc[0].get(col_borc, 0))
+        rep_alacak = float(parent_row.iloc[0].get(col_alacak, 0))
+        reported_value = rep_borc - rep_alacak
+        computed_value = period_borc - period_alacak
+
+        if abs(reported_value - computed_value) <= 0.01:
+            validation_status = "match"
+        else:
+            validation_status = "mismatch"
+            logger.warning(
+                f"⚠️ Hierarchy mismatch for {code}: "
+                f"reported={reported_value:,.2f}, computed={computed_value:,.2f}, "
+                f"diff={abs(reported_value - computed_value):,.2f}"
+            )
+    elif len(leaf_codes) == 1 and leaf_codes[0] == code:
+        validation_status = "leaf_direct"
+
+    return {
+        "period_borc": period_borc,
+        "period_alacak": period_alacak,
+        "period_movement": period_borc - period_alacak,
+        "closing_borc_bakiye": closing_b,
+        "closing_alacak_bakiye": closing_a,
+        "closing_balance": closing_b - closing_a,
+        "leaf_count": len(leaf_codes),
+        "leaf_codes": leaf_codes,
+        "reported_value": reported_value,
+        "validation_status": validation_status,
+    }
+
+
+def _find_node_in_tree(code: str, tree: dict):
+    """Find a node in the hierarchy tree by its code."""
+    if code in tree:
+        return tree[code]
+    for key, node in tree.items():
+        found = _find_node_in_tree(code, node.get("children", {}))
+        if found is not None:
+            return found
+    return None
 
 
 class QuantAnalystAgent(BaseAgent):
     name = "quant_analyst"
-    description = "Calculate financial ratios from standardized Mizan data"
+    description = "Calculate financial ratios from standardized Mizan data with dynamic mapping"
     required_inputs = ["standardized_mizan"]
     output_keys = ["financial_ratios"]
 
@@ -128,14 +233,30 @@ class QuantAnalystAgent(BaseAgent):
         if verification_errors:
             logger.info(f"Verification feedback: {verification_errors}")
 
+        # ── Read Dönem (time period) from pipeline state ──
+        donem_info = state.get("donem_info") or {"period_days": 360, "period_months": 12, "raw": "unknown", "label": "Annual (12M) — default"}
+        period_days = donem_info.get("period_days", 360)
+        period_months = donem_info.get("period_months", 12)
+        donem_label = donem_info.get("label", "Unknown")
+        logger.info(f"Using Dönem: {donem_label} ({period_days} days)")
+
         standardized = state.get("standardized_mizan", [])
         if not standardized:
             return {"financial_ratios": {"error": "No standardized mizan data"}, "retry_count": retry_count + 1}
 
         df = pd.DataFrame(standardized)
 
+        # ── STEP 1: Build dynamic mapping from document ──
+        aciklama_map = _build_dynamic_mapping(df)
+
+        # ── STEP 2: Build hierarchy tree ──
+        hierarchy_tree = _build_hierarchy_tree(df)
+        logger.info(f"Hierarchy tree built: {len(hierarchy_tree)} root nodes")
+
+        # ── STEP 3: Define balance functions ──
+
         def bal(code: str) -> float:
-            """Get net balance for an account code (exact match or prefix sum)."""
+            """Get net balance for an account code (exact match or prefix sum). UNCHANGED."""
             # Try exact match first
             m = df[df["account_code"] == code]
             if not m.empty:
@@ -147,11 +268,46 @@ class QuantAnalystAgent(BaseAgent):
             return 0.0
 
         def bal_named(code: str) -> dict:
-            """Get balance with hesap kodu açıklama citation."""
+            """
+            Hierarchy-aware balance with dynamic mapping, dual balances,
+            and data validation (double-check).
+
+            Returns enriched dict with:
+            - value: absolute closing balance (primary metric for ratios)
+            - hesap_kodu / hesap_kodu_aciklama: from dynamic mapping
+            - period_movement: borc - alacak (period activity)
+            - closing_balance: borc_bakiye - alacak_bakiye (remaining)
+            - children_sum: computed from leaf aggregation
+            - validation_status: match/mismatch/leaf_direct/not_found
+            """
+            agg = _aggregate_hierarchy(df, code, hierarchy_tree)
+
+            # Determine description from dynamic mapping
+            desc = aciklama_map.get(code, "")
+            if not desc:
+                # Try to find closest parent with a name
+                prefix = code.split(".")[0]
+                desc = aciklama_map.get(prefix, f"HESAP {code}")
+
+            # Primary value: use closing balance when available, fallback to period movement
+            closing = agg["closing_balance"]
+            period = agg["period_movement"]
+            primary_value = closing if closing != 0 else period
+
             return {
-                "value": abs(bal(code)),
+                "value": abs(primary_value),
                 "hesap_kodu": code,
-                "hesap_kodu_aciklama": _get_aciklama(code),
+                "hesap_kodu_aciklama": desc,
+                "period_movement": period,
+                "period_borc": agg["period_borc"],
+                "period_alacak": agg["period_alacak"],
+                "closing_balance": closing,
+                "closing_borc_bakiye": agg["closing_borc_bakiye"],
+                "closing_alacak_bakiye": agg["closing_alacak_bakiye"],
+                "leaf_count": agg["leaf_count"],
+                "leaf_codes": agg["leaf_codes"],
+                "children_sum": abs(period),
+                "validation_status": agg["validation_status"],
             }
 
         # ── LOCAL CALCULATIONS ──
@@ -198,16 +354,18 @@ class QuantAnalystAgent(BaseAgent):
                 if code.startswith(parent_code) and code != parent_code:
                     net_bal = abs(float(row["debit"]) - float(row["credit"]))
                     if net_bal > 0:
+                        # Use dynamic mapping for name
+                        name = aciklama_map.get(code, str(row.get("account_name", code)))
                         shares.append({
-                            "name": str(row.get("account_name", code)),
+                            "name": name,
                             "balance": net_bal
                         })
                         total_bal += net_bal
-            
+
             # Calculate percentages
             for s in shares:
                 s["share_pct"] = (s["balance"] / total_bal * 100) if total_bal else 0
-            
+
             # Sort highest balance first
             shares.sort(key=lambda x: x["balance"], reverse=True)
             return shares
@@ -242,16 +400,66 @@ class QuantAnalystAgent(BaseAgent):
         trade_recv_120 = abs(bal("120"))
         trade_recv_121 = abs(bal("121"))
         trade_receivables = trade_recv_120 + trade_recv_121
-        collection_period = (trade_receivables / revenue_600 * 365) if revenue_600 else 0
+        collection_period = (trade_receivables / revenue_600 * period_days) if revenue_600 else 0
 
         trade_pay_320 = abs(bal("320"))
         trade_pay_321 = abs(bal("321"))
         trade_payables = trade_pay_320 + trade_pay_321
-        payment_period = (trade_payables / cogs_620 * 365) if cogs_620 else 0
+        payment_period = (trade_payables / cogs_620 * period_days) if cogs_620 else 0
 
         # Transactional / Behavioral Metrics
         pos_780_01 = abs(bal("780.01"))
         pos_ratio = (pos_780_01 / revenue_600 * 100) if revenue_600 else 0
+
+        # ── HIERARCHY ENRICHMENT: bal_named() with validation ──
+        # Log validation results for key accounts
+        key_accounts = ["100", "101", "102", "120", "150", "300", "320", "400", "500", "600", "620", "780"]
+        validation_warnings = []
+        for kc in key_accounts:
+            named = bal_named(kc)
+            if named["validation_status"] == "mismatch":
+                validation_warnings.append(
+                    f"{kc}-{named['hesap_kodu_aciklama']}: "
+                    f"leaf_sum={named['children_sum']:,.0f} vs reported"
+                )
+
+        if validation_warnings:
+            logger.warning(f"🔍 Data validation warnings:\n" + "\n".join(f"  ⚠️ {w}" for w in validation_warnings))
+
+        # ── Build hierarchy summary for key accounts ──
+        def hierarchy_detail(code: str) -> dict:
+            """Get hierarchy detail including children breakdown for a code."""
+            named = bal_named(code)
+            node = _find_node_in_tree(code, hierarchy_tree)
+            children_detail = []
+            if node and node.get("children"):
+                for child_code, child_node in node["children"].items():
+                    child_named = bal_named(child_code)
+                    leaf_detail = []
+                    if child_node.get("children"):
+                        for leaf_code, leaf_node in child_node["children"].items():
+                            leaf_named = bal_named(leaf_code)
+                            leaf_detail.append({
+                                "code": leaf_code,
+                                "name": leaf_named["hesap_kodu_aciklama"],
+                                "period_movement": leaf_named["period_movement"],
+                                "closing_balance": leaf_named["closing_balance"],
+                            })
+                    children_detail.append({
+                        "code": child_code,
+                        "name": child_named["hesap_kodu_aciklama"],
+                        "period_movement": child_named["period_movement"],
+                        "closing_balance": child_named["closing_balance"],
+                        "leaves": leaf_detail,
+                    })
+            return {
+                **named,
+                "children_detail": children_detail,
+            }
+
+        account_hierarchy = {
+            code: hierarchy_detail(code) for code in ["101", "102", "120", "150", "300", "320", "400"]
+        }
 
         ratios = {
             "gross_margin": {
@@ -303,8 +511,9 @@ class QuantAnalystAgent(BaseAgent):
             },
             "collection_period": {
                 "value": round(collection_period, 0), "unit": "days",
-                "formula": "Trade Receivables[120+121] / Revenue[600] × 365",
+                "formula": f"Trade Receivables[120+121] / Revenue[600] × {period_days}",
                 "accounts_used": ["120", "121", "600"],
+                "period_days_used": period_days,
                 "raw_values": {
                     "trade_receivables_120": bal_named("120"),
                     "trade_receivables_121": bal_named("121"),
@@ -314,8 +523,9 @@ class QuantAnalystAgent(BaseAgent):
             },
             "payment_period": {
                 "value": round(payment_period, 0), "unit": "days",
-                "formula": "Trade Payables[320+321] / COGS[620] × 365",
+                "formula": f"Trade Payables[320+321] / COGS[620] × {period_days}",
                 "accounts_used": ["320", "321", "620"],
+                "period_days_used": period_days,
                 "raw_values": {
                     "trade_payables_320": bal_named("320"),
                     "trade_payables_321": bal_named("321"),
@@ -364,12 +574,27 @@ class QuantAnalystAgent(BaseAgent):
                     "revenue_600": bal_named("600"),
                 }
             },
-            # Save competitor data in the dict so downstream Strategist can access it too
+            # Competitor data for downstream Strategist
             "competitor_banks": {
                 "102": banks_102,
                 "300": banks_300,
                 "400": banks_400
-            }
+            },
+            # Hierarchical account tree for downstream agents
+            "account_hierarchy": account_hierarchy,
+            # Dynamic mapping for reference
+            "dynamic_mapping": aciklama_map,
+            # Data validation results
+            "validation_warnings": validation_warnings,
+            # Temporal context
+            "donem_context": {
+                "raw": donem_info.get("raw"),
+                "year": donem_info.get("year"),
+                "period_months": period_months,
+                "period_days": period_days,
+                "label": donem_label,
+                "annualization_factor": round(12 / period_months, 2) if period_months else 1.0,
+            },
         }
 
         for n, d in ratios.items():
@@ -383,31 +608,80 @@ class QuantAnalystAgent(BaseAgent):
                 f"- {n}: {d['value']}{d['unit']} (accounts: {d['accounts_used']})"
                 for n, d in ratios.items() if isinstance(d, dict) and "value" in d
             )
-            
+
+            # Build hierarchy breakdown strings for key accounts
+            def fmt_hierarchy(code: str) -> str:
+                h = account_hierarchy.get(code, {})
+                children = h.get("children_detail", [])
+                if not children:
+                    return f"  {code}-{h.get('hesap_kodu_aciklama', '?')}: " \
+                           f"Period={h.get('period_movement', 0):,.0f}, " \
+                           f"Closing={h.get('closing_balance', 0):,.0f}"
+                lines = [f"  {code}-{h.get('hesap_kodu_aciklama', '?')} (total):"]
+                for child in children:
+                    lines.append(
+                        f"    └─ {child['code']}-{child['name']}: "
+                        f"Period={child['period_movement']:,.0f}, "
+                        f"Closing={child['closing_balance']:,.0f}"
+                    )
+                    for leaf in child.get("leaves", []):
+                        lines.append(
+                            f"       └─ {leaf['code']}-{leaf['name']}: "
+                            f"Period={leaf['period_movement']:,.0f}, "
+                            f"Closing={leaf['closing_balance']:,.0f}"
+                        )
+                return "\n".join(lines)
+
+            # Get enriched bal_named data for key accounts
+            bn_600 = bal_named("600")
+            bn_620 = bal_named("620")
+            bn_101 = bal_named("101")
+            bn_103 = bal_named("103")
+
+            hierarchy_section = "\n".join(
+                fmt_hierarchy(c) for c in ["101", "102", "120", "300", "400"]
+            )
+
+            validation_section = ""
+            if validation_warnings:
+                validation_section = (
+                    "\n### ⚠️ DATA VALIDATION WARNINGS:\n" +
+                    "\n".join(f"- {w}" for w in validation_warnings)
+                )
+
             prompt = (
+                f"⏱️ DATA PERIOD: {donem_label} ({period_days} days). "
+                f"All turnover/period metrics are scaled to this timeframe.\n\n"
                 f"Analyze these financial ratios for {state.get('company_name', 'Company')} ({state.get('sector', 'General')}):\n\n"
                 f"{summary}\n\n"
-                f"### RAW DATA FOR ANALYSIS (with Hesap Kodu Açıklama):\n"
-                f"- **600-YURTİÇİ SATIŞLAR:** ₺{revenue_600:,.0f} | **620-SATILAN MALIN MALİYETİ:** ₺{cogs_620:,.0f}\n"
-                f"- **630-ARAŞTIRMA GELİŞTİRME GİD.:** ₺{op_exp_630:,.0f} | **631-PAZARLAMA SATIŞ GİD.:** ₺{op_exp_631:,.0f} | **632-GENEL YÖNETİM GİD.:** ₺{op_exp_632:,.0f}\n"
+                f"### RAW DATA (Dynamically Extracted — Hesap Kodu Açıklama from Document):\n"
+                f"- **600-{bn_600['hesap_kodu_aciklama']}:** Period=₺{bn_600['period_movement']:,.0f}, Closing=₺{bn_600['closing_balance']:,.0f}\n"
+                f"- **620-{bn_620['hesap_kodu_aciklama']}:** Period=₺{abs(bal('620')):,.0f}\n"
+                f"- **630-{bal_named('630')['hesap_kodu_aciklama']}:** ₺{op_exp_630:,.0f} | **631-{bal_named('631')['hesap_kodu_aciklama']}:** ₺{op_exp_631:,.0f} | **632-{bal_named('632')['hesap_kodu_aciklama']}:** ₺{op_exp_632:,.0f}\n"
                 f"- **Dönen Varlıklar (1xx):** ₺{current_assets:,.0f} | **150-153 STOKLAR:** ₺{inventory:,.0f} | **Kısa Vadeli Borçlar (3xx):** ₺{short_term_liab:,.0f}\n"
-                f"- **120-ALICILAR:** ₺{trade_recv_120:,.0f} | **121-ALACAK SENETLERİ:** ₺{trade_recv_121:,.0f}\n"
-                f"- **320-SATICILAR:** ₺{trade_pay_320:,.0f} | **321-BORÇ SENETLERİ:** ₺{trade_pay_321:,.0f}\n"
-                f"- **101-ALINAN ÇEKLER:** ₺{received_checks_101:,.0f} | **103-VERİLEN ÇEKLER:** ₺{given_checks_103:,.0f}\n"
-                f"- **Total Liabilities:** ₺{total_liab:,.0f} | **300-BANKA KREDİLERİ (KV):** ₺{short_term_loans_300:,.0f} | **309-DİĞER MALİ BORÇLAR:** ₺{credit_card_expenses_309:,.0f} | **400-BANKA KREDİLERİ (UV):** ₺{long_term_loans_400:,.0f}\n"
-                f"- **500-SERMAYE:** ₺{abs(bal('500')):,.0f} | **570-GEÇMİŞ YIL KÂRLARI:** ₺{abs(bal('570')):,.0f} | **Total Equity:** ₺{total_equity:,.0f}\n"
-                f"- **780-FİNANSMAN GİDERLERİ:** ₺{fin_exp_780:,.0f} | **780.01-POS KOMİSYON GİDERLERİ:** ₺{pos_780_01:,.0f}\n\n"
+                f"- **120-{bal_named('120')['hesap_kodu_aciklama']}:** ₺{trade_recv_120:,.0f} | **121-{bal_named('121')['hesap_kodu_aciklama']}:** ₺{trade_recv_121:,.0f}\n"
+                f"- **320-{bal_named('320')['hesap_kodu_aciklama']}:** ₺{trade_pay_320:,.0f} | **321-{bal_named('321')['hesap_kodu_aciklama']}:** ₺{trade_pay_321:,.0f}\n"
+                f"- **101-{bn_101['hesap_kodu_aciklama']}:** Period=₺{bn_101['period_movement']:,.0f}, Closing=₺{bn_101['closing_balance']:,.0f}\n"
+                f"- **103-{bn_103['hesap_kodu_aciklama']}:** Period=₺{abs(bal('103')):,.0f}\n"
+                f"- **Total Liabilities:** ₺{total_liab:,.0f} | **300-{bal_named('300')['hesap_kodu_aciklama']}:** ₺{short_term_loans_300:,.0f} | **309-{bal_named('309')['hesap_kodu_aciklama']}:** ₺{credit_card_expenses_309:,.0f} | **400-{bal_named('400')['hesap_kodu_aciklama']}:** ₺{long_term_loans_400:,.0f}\n"
+                f"- **500-{bal_named('500')['hesap_kodu_aciklama']}:** ₺{abs(bal('500')):,.0f} | **570-{bal_named('570')['hesap_kodu_aciklama']}:** ₺{abs(bal('570')):,.0f} | **Total Equity:** ₺{total_equity:,.0f}\n"
+                f"- **780-{bal_named('780')['hesap_kodu_aciklama']}:** ₺{fin_exp_780:,.0f} | **780.01-{bal_named('780.01')['hesap_kodu_aciklama']}:** ₺{pos_780_01:,.0f}\n\n"
+                f"### HIERARCHICAL ACCOUNT BREAKDOWNS:\n{hierarchy_section}\n\n"
                 f"### COMPETITOR BANK DISTRIBUTION:\n"
                 f"- **102-BANKALAR (Deposits):** {fmt_shares(banks_102)}\n"
                 f"- **300-BANKA KREDİLERİ KV (ST Loans):** {fmt_shares(banks_300)}\n"
                 f"- **400-BANKA KREDİLERİ UV (LT Loans):** {fmt_shares(banks_400)}\n\n"
+                f"{validation_section}\n\n"
                 f"Based on your system instructions, structure your analysis into these four exact pillars:\n"
                 f"1. PROFITABILITY\n"
                 f"2. LIQUIDITY & WORKING CAPITAL\n"
                 f"3. LEVERAGE & DEPENDENCY\n"
                 f"4. TRANSACTIONAL COST\n\n"
-                f"IMPORTANT: Cite every value with its hesap kodu and açıklama (e.g., '101-ALINAN ÇEKLER: ₺X').\n"
-                f"Identify red flags and map the mathematical groundwork for downstream cross-selling, explicitly utilizing the competitor bank distribution."
+                f"IMPORTANT: Cite every value with its hesap kodu and dynamically-extracted açıklama.\n"
+                f"For each key account, analyze BOTH the period movement (Borç/Alacak) AND the closing balance (Bakiye) to assess financial dynamics.\n"
+                f"Identify red flags and map the mathematical groundwork for downstream cross-selling, explicitly utilizing the competitor bank distribution.\n\n"
+                f"Note to Strategist: These financial metrics reflect a {donem_label} snapshot ({period_days} days). "
+                f"Annualized projections should multiply period values by {12/period_months:.1f}x."
             )
             llm_text = invoke_llm(QUANT_ANALYST_SYSTEM_PROMPT, prompt, temperature=0.2, max_tokens=1500)
             self.metrics.record_llm_call(tokens=len(llm_text.split()))

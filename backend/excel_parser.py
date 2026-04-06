@@ -22,6 +22,8 @@ COLUMN_MAP = {
     "Alacak": "credit",
     "Bakiye Borç": "balance_debit",
     "Bakiye Alacak": "balance_credit",
+    "Dönem": "donem",
+    "Donem": "donem",
 }
 
 
@@ -73,6 +75,85 @@ def parse_mizan_excel(file_bytes: bytes) -> pd.DataFrame:
     df = df.reset_index(drop=True)
     logger.info(f"Parsed {len(df)} accounts from Excel")
     return df
+
+
+def extract_donem(df: pd.DataFrame) -> dict:
+    """
+    Extract and parse the Dönem (time period) from a Mizan DataFrame.
+
+    The Dönem column uses YYYYMM format:
+        202412 → covers all 12 months of 2024 (360 days)
+        202503 → covers first 3 months of 2025 (90 days)
+
+    Uses 360-day year convention (month × 30) per Turkish banking standards.
+
+    Returns:
+        dict with keys: raw, year, month, period_months, period_days, label
+    Falls back to full-year (360 days) if column is missing or unparseable.
+    """
+    DEFAULT = {
+        "raw": "unknown",
+        "year": None,
+        "month": 12,
+        "period_months": 12,
+        "period_days": 360,
+        "label": "Annual (12M) — default, no Dönem column found",
+    }
+
+    if "donem" not in df.columns:
+        logger.warning("No 'Dönem' column found in Mizan — defaulting to full-year (360 days)")
+        return DEFAULT
+
+    # Get the first non-null Dönem value
+    donem_series = df["donem"].dropna()
+    if donem_series.empty:
+        logger.warning("Dönem column is empty — defaulting to full-year (360 days)")
+        return DEFAULT
+
+    raw_value = str(donem_series.iloc[0]).strip()
+
+    # Parse YYYYMM
+    try:
+        # Handle potential float conversion (e.g., 202503.0)
+        raw_value = str(int(float(raw_value)))
+
+        if len(raw_value) != 6:
+            raise ValueError(f"Dönem value '{raw_value}' is not 6 digits (YYYYMM)")
+
+        year = int(raw_value[:4])
+        month = int(raw_value[4:6])
+
+        if not (1 <= month <= 12):
+            raise ValueError(f"Dönem month '{month}' out of range [1-12]")
+        if not (2000 <= year <= 2099):
+            raise ValueError(f"Dönem year '{year}' out of expected range [2000-2099]")
+
+        period_months = month
+        period_days = month * 30  # 360-day year convention
+
+        # Human-readable label
+        if period_months == 12:
+            label = f"Annual (12M, {year})"
+        elif period_months % 3 == 0:
+            quarter = period_months // 3
+            label = f"Q{quarter} ({period_months}M, {year})"
+        else:
+            label = f"{period_months}M ({year})"
+
+        result = {
+            "raw": raw_value,
+            "year": year,
+            "month": month,
+            "period_months": period_months,
+            "period_days": period_days,
+            "label": label,
+        }
+        logger.info(f"Parsed Dönem: {raw_value} → {label} ({period_days} days)")
+        return result
+
+    except (ValueError, TypeError) as e:
+        logger.warning(f"Failed to parse Dönem '{raw_value}': {e} — defaulting to full-year (360 days)")
+        return DEFAULT
 
 
 def _generate_vkn() -> str:

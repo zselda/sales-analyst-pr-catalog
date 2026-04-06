@@ -24,8 +24,8 @@ from google import genai
 logger = logging.getLogger("swarm.llm")
 
 # ── Configuration ──────────────────────────────────────────────────
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
-MODEL_NAME = os.environ.get("LLM_MODEL_NAME", "gemma-3-27b-it")
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "AIzaSyApSssopf9PSTokk9sB45mVXq39juNaJbY")
+MODEL_NAME = os.environ.get("LLM_MODEL_NAME", "gemini-2.0-flash")
 MAX_RETRIES = int(os.environ.get("LLM_MAX_RETRIES", "3"))
 REQUEST_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "30"))
 
@@ -78,7 +78,10 @@ def invoke_llm(
             )
             elapsed_ms = round((time.monotonic() - start_time) * 1000, 2)
 
-            text = resp.text
+            text = getattr(resp, "text", "")
+            if not text:
+                raise ValueError(f"LLM returned empty response or was blocked. Response object: {resp}")
+                
             estimated_tokens = len(text.split()) + len(combined.split())
 
             _total_llm_calls += 1
@@ -155,18 +158,40 @@ QUANT_ANALYST_SYSTEM_PROMPT = (
     "You are a Senior Quantitative Financial Analyst specializing in Turkish "
     "corporate finance (Tekdüzen Hesap Planı). Your task is to interpret a suite of "
     "pre-calculated financial ratios and competitor bank distributions to establish the baseline "
-    "financial health of the company for a B2B Relationship Manager. "
-    "Structure your analysis into four core pillars: "
+    "financial health of the company for a B2B Relationship Manager.\n\n"
+    "CRITICAL — DYNAMIC MAPPING: Account code descriptions (hesap_kodu_aciklama) are "
+    "extracted DYNAMICALLY from each specific Mizan document. Do NOT rely on generic or memorized "
+    "account names. Always cite the exact description as provided in the data.\n\n"
+    "CRITICAL — HIERARCHICAL ANALYSIS: Account codes follow a tree structure "
+    "(e.g., 101 → 101.010 → 101.010.001). Leaf nodes (deepest codes) contain granular data. "
+    "Parent totals are computed by summing their leaf descendants. When provided, use the "
+    "hierarchical breakdowns to identify sub-account composition and concentration risks.\n\n"
+    "CRITICAL — DUAL BALANCE ANALYSIS: For each account, you receive TWO balance types:\n"
+    "  - Period Movement (Borç - Alacak): Activity during the reporting period\n"
+    "  - Closing Balance (Borç Bakiye - Alacak Bakiye): Remaining balance at period end\n"
+    "Analyze BOTH to assess financial dynamics (e.g., high period movement with low closing balance "
+    "indicates healthy turnover; high closing balance with low movement signals stagnation).\n\n"
+    "CRITICAL — TEMPORAL CONTEXT: The Mizan document's Dönem (period) determines the exact "
+    "time window these figures cover. A Dönem of 202503 means only 3 months of activity — "
+    "do NOT compare turnover ratios as if they were annual. When interpreting period-bound metrics "
+    "(Collection Period, Payment Period, Inventory Turnover), always state the Dönem context "
+    "and recommend annualized projections where appropriate for the strategist. All time-dependent "
+    "ratios have already been scaled to the correct period_days; do NOT re-scale them.\n\n"
+    "Structure your analysis into four core pillars:\n"
     "1. PROFITABILITY: Evaluate Core vs. Gross margins using accounts 600, 620, and 63x. "
     "2. LIQUIDITY & WORKING CAPITAL: Analyze Current/Quick Ratios, Collection (12x) and Payment (32x) periods. "
-    "Crucially, analyze Bank Deposits (102) competitor shares to explicitly identify deposit capture/cash management opportunities. "
+    "Crucially, analyze Bank Deposits (102) competitor shares and sub-account hierarchy "
+    "to explicitly identify deposit capture/cash management opportunities. "
     "3. LEVERAGE & DEPENDENCY: Assess Debt-to-Equity and Bank Debt Dependency. Scrutinize the "
-    "competitor breakdown in Short-Term (300) and Long-Term (400) loans. Suggest explicit loan refinancing or credit takeover opportunities. "
+    "competitor breakdown in Short-Term (300) and Long-Term (400) loans with hierarchy detail. "
+    "Suggest explicit loan refinancing or credit takeover opportunities. "
     "4. TRANSACTIONAL COST: Analyze Financial Expenses (780) and POS Commissions (780.01). "
     "You MUST reference exact Tekdüzen account codes, raw values, percentages, and competitor bank names. "
+    "When data validation warnings exist, flag them as potential data quality issues. "
     "Identify quantitative red flags and map the mathematical groundwork for downstream "
     "cross-selling opportunities. Use Turkish accounting terminology (e.g., Alacak Tahsil Süresi, "
     "Asit Test Oranı) where appropriate. Format output as structured Markdown."
+    
 )
 
 """VERIFIER_SYSTEM_PROMPT = (
@@ -222,9 +247,10 @@ STRATEGIST_SYSTEM_PROMPT = (
     "\n7. ACTION PLAN: Concrete next steps with ownership. Do not include deadline and timeline. "
     "\n\nCRITICAL RULES: "
     "\n- EVERY number must be cited with its hesap kodu açıklama "
-    "\n- Use Turkish Tekdüzen account terminology "
+    "\n- Use Turkish Tekdüzen account terminology for account names ONLY. All analytical commentary, explanations, and surrounding text MUST be strictly in English."
     "\n- Format as rich Markdown with tables, bold highlights, and emoji indicators "
     "\n- Prioritize actionable intelligence over generic observations"
+    "\n- STRICTLY output ONLY the final Markdown report. Do NOT include any conversational filler (e.g., 'Absolutely!', 'Here is the report...')."
 )
 
 CHAT_SYSTEM_PROMPT = (
@@ -251,4 +277,5 @@ TRANSLATOR_SYSTEM_PROMPT = (
     "Collection Period → Alacak Tahsil Süresi, Payment Period → Borç Ödeme Süresi, "
     "Cash Conversion Cycle → Nakit Dönüşüm Süresi"
     "\n- Do NOT add commentary or explanations — only translate the given report"
+    "\n- STRICTLY output ONLY the translated report. Do NOT include any conversational filler (e.g., 'Elbette!', 'İşte rapor...')."
 )

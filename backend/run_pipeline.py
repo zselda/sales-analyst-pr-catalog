@@ -34,6 +34,7 @@ from graph import build_standalone_graph
 from agents.evaluation import rubric
 from pdf_generator import save_report_pdf
 from html_generator import generate_report_html
+from graph_visualizer import save_network_html
 
 # ── Logging ──
 logging.basicConfig(
@@ -44,7 +45,7 @@ logging.basicConfig(
 logger = logging.getLogger("pipeline")
 
 
-def run_pipeline(file_path: str, generate_turkish: bool = False, output_dir: str = "./output"):
+def run_pipeline(file_path: str, generate_turkish: bool = False, output_dir: str = "./output", no_graph: bool = False):
     """
     Execute the full financial analysis pipeline.
 
@@ -52,12 +53,14 @@ def run_pipeline(file_path: str, generate_turkish: bool = False, output_dir: str
         file_path: Path to the Mizan Excel (.xlsx) file
         generate_turkish: If True, translate report to Turkish and generate TR PDF
         output_dir: Directory for output files (HTML, PDFs)
+        no_graph: If True, skip generating interactive network HTML graph
     """
     logger.info("=" * 60)
     logger.info("  FINANCIAL INTELLIGENCE PIPELINE — STANDALONE MODE")
     logger.info(f"  File: {file_path}")
     logger.info(f"  Turkish: {'YES' if generate_turkish else 'NO'}")
     logger.info(f"  Output: {output_dir}")
+    logger.info(f"  Graph: {'SKIPPED' if no_graph else 'ENABLED'}")
     logger.info("=" * 60)
 
     # ── Step 1: Parse Excel ──
@@ -138,6 +141,17 @@ def run_pipeline(file_path: str, generate_turkish: bool = False, output_dir: str
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html_content)
     logger.info(f"  EN HTML: {html_path}")
+
+    # Interactive network graph
+    if not no_graph:
+        network_data = result.get("network_data", {})
+        if network_data and network_data.get("nodes"):
+            graph_path = save_network_html(network_data, output_dir, company_name)
+            logger.info(f"  Network Graph: {graph_path}")
+        else:
+            logger.warning("  No network data available for graph visualization")
+    else:
+        logger.info("  Network Graph generation skipped via --no-graph")
     
     if generate_turkish:
         tr_html_content = generate_report_html(result, language="TR")
@@ -194,14 +208,20 @@ Examples:
         default="./output",
         help="Output directory for HTML and PDF files (default: ./output)",
     )
+    parser.add_argument(
+        "--no-graph",
+        action="store_true",
+        default=False,
+        help="Skip generating the interactive network HTML graph",
+    )
 
     args = parser.parse_args()
     run_pipeline(
         file_path=args.file,
         generate_turkish=args.turkish,
         output_dir=args.output_dir,
+        no_graph=args.no_graph,
     )
-
 
 if __name__ == "__main__":
     main()

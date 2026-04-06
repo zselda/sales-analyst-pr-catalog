@@ -45,3 +45,9 @@ backend/data/*.csv
 
 # Node modules (if any)
 node_modules/
+
+# Generated Output & Logs
+backend/output/
+backend/*.txt
+backend/*.xlsx
+*.xlsx

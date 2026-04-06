@@ -10,6 +10,7 @@ Refactored to use BaseAgent for tracing and error isolation.
 import logging
 import pandas as pd
 from agents.base import BaseAgent
+from excel_parser import extract_donem
 
 logger = logging.getLogger("swarm.agents.data_ingestion")
 
@@ -56,8 +57,10 @@ class DataIngestionAgent(BaseAgent):
                 3: "Short-Term Liabilities",
                 4: "Long-Term Liabilities",
                 5: "Equity",
-                6: "Revenue",
-                7: "Expenses",
+                6: "Profit & Loss Accounts",
+                7: "Cost Accounts",
+                8: "Free Accounts",
+                9: "Off-Balance Sheet Accounts"
             }
             return classifications.get(first_digit, "Unknown")
 
@@ -79,7 +82,11 @@ class DataIngestionAgent(BaseAgent):
             count = len(df[df["category"] == cat])
             logger.info(f"  - {cat}: {count} accounts")
 
-        return {"standardized_mizan": standardized}
+        # --- Step 6: Extract Dönem (time period) from document ---
+        donem_info = extract_donem(df)
+        logger.info(f"Detected period: {donem_info['label']} ({donem_info['period_days']} days)")
+
+        return {"standardized_mizan": standardized, "donem_info": donem_info}
 
 
 # Module-level callable for LangGraph

@@ -39,6 +39,7 @@ class SwarmState(TypedDict):
     sector: Optional[str]
     mizan_data: Optional[list]
     standardized_mizan: Optional[list]
+    donem_info: Optional[dict]
     financial_ratios: Optional[dict]
     verification_status: Optional[str]
     verification_errors: Optional[str]

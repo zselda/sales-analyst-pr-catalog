@@ -203,6 +203,7 @@ async def run_swarm(request: RunSwarmRequest):
             "sector": sector,
             "mizan_data": mizan_df.to_dict(orient="records"),
             "standardized_mizan": None, "financial_ratios": None,
+            "donem_info": None,
             "verification_status": None, "verification_errors": "",
             "retry_count": 0,
             "network_data": None, "strategy_report": None,
