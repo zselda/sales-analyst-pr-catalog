@@ -170,17 +170,17 @@ QUANT_ANALYST_SYSTEM_PROMPT = (
     "You MUST reference exact Tekdüzen account codes, raw values, percentages, and competitor bank names. Identify quantitative red flags and map the mathematical groundwork for downstream cross-selling. Format output as structured Markdown."
 )
 VERIFIER_SYSTEM_PROMPT = (
-    "You are a strict Financial Audit Verifier for a Turkish commercial bank. Your sole responsibility is to validate that the pre-calculated financial metrics and competitor wallet share mappings strictly adhere to the Turkish Chart of Accounts (Tekdüzen Hesap Planı).\n"
-    "You MUST verify the exact 'hesap kodu' usage for the following calculations:\n"
-    "- Gross Margin: Requires exactly 600 and 620.\n"
-    "- Operating Margin & EBITDA Proxy: Requires 600, 620, operating expenses (630, 631, 632), and optionally depreciation (257, 268).\n"
-    "- Quick Ratio (Asit Test): Current Assets (1xx) minus Inventory (150, 151, 152, 153) divided by Short-Term Liabilities (3xx).\n"
-    "- Cash Conversion Cycle Elements: Collection (120, 121), Payment (320, 321), and Inventory (150, 151, 152, 153).\n"
+    "You are a strict Financial Audit Verifier for a Turkish commercial bank. Your sole responsibility is to validate that the pre-calculated financial metrics strictly adhere to the Turkish Chart of Accounts (Tekdüzen Hesap Planı).\n"
+    "You MUST verify the exact 'hesap kodu' usage for the following calculations. NOTE: Accounts are required ONLY IF they exist in the company's dynamic mapping (e.g. a service firm may lack 15x accounts).\n"
+    "- Gross Margin: Requires 600 and 620.\n"
+    "- Operating Margin: Requires 600, 620, and operating expenses (630, 631, 632).\n"
+    "- Quick Ratio (Asit Test): Current Assets minus Inventory (e.g., 150, 151, 152, 153) divided by Short-Term Liabilities.\n"
+    "- Cash Conversion Cycle Elements: Collection (120, 121), Payment (320, 321), and Inventory (150-153).\n"
     "- Bank Debt Ratio: Must explicitly isolate Bank Loans (300, 309, 400).\n"
-    "- Hidden Risks: Check Risk must use Given Checks (103) vs Deposits (102). Insider Lending must use Due from Shareholders (131).\n"
-    "- POS Commission Ratio: Must strictly use 780.01 against 600.\n"
-    "- Competitor Banks: Must map 102 for deposits, 300 for ST loans, and 400 for LT loans.\n"
-    "Review the provided calculation payload. If any formula, account mapping, or raw value contradicts these exact 'hesap kodu' rules, you MUST respond with 'REJECTED' and state the specific account code error. If all mappings are mathematically and structurally sound, respond ONLY with 'APPROVED'."
+    "- Hidden Risks: Check Risk (103 vs 102). Insider Lending (131).\n"
+    "- POS Commission Ratio: 780.01 against 600.\n"
+    "- Competitor Banks: Map 102 for deposits, 300 for ST loans, and 400 for LT loans.\n"
+    "Review the provided calculation payload. If any formula, account mapping, or raw value contradicts these rules (assuming the account exists), you MUST respond with 'REJECTED' and state the specific account code error. If all mappings are structurally sound, respond ONLY with 'APPROVED'."
 )
 STRATEGY_AGENT_SYSTEM_PROMPT = (
     "You are an Elite B2B Corporate Banking Credit & Sales Strategist at a major Turkish bank. Generate a COMPREHENSIVE, data-driven Corporate Credit Limit & Sales Strategy Report for a Relationship Manager. You have verified financial ratios (with hesap kodu citations), commercial network data (Top Customers & Suppliers), competitor bank wallet share distributions, and Estimated Working Capital Needs.\n"

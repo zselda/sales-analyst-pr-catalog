@@ -1050,48 +1050,398 @@ class QuantAnalystAgent(BaseAgent):
             if bal(main_code) > 0:
                 validated_hierarchy[main_code] = bal_named(main_code)
         # ── COMPILE RATIOS & DYNAMIC CONTEXT ──
+        # ratios = {
+        #     "gross_margin": {"value": round(gross_margin, 2), "unit": "%"},
+        #     "operating_margin": {"value": round(operating_margin, 2), "unit": "%"},
+        #     "current_ratio": {"value": round(current_ratio, 2), "unit": "x"},
+        #     "quick_ratio": {"value": round(quick_ratio, 2), "unit": "x"},
+        #     "collection_period": {"value": round(collection_period, 0), "unit": "days"},
+        #     "payment_period": {"value": round(payment_period, 0), "unit": "days"},
+        #     "inventory_period": {"value": round(inventory_period, 0), "unit": "days"},
+        #     "cash_conversion_cycle": {"value": round(cash_conversion_cycle, 0), "unit": "days"},
+        #     "debt_to_equity": {"value": round(debt_to_equity, 2), "unit": "x"},
+        #     "bank_debt_ratio": {"value": round(bank_debt_ratio, 2), "unit": "%"},
+        #     "financial_expense_ratio": {"value": round(fin_expense_ratio, 2), "unit": "%"},
+        #     "pos_commission_ratio": {
+        #         "value": round((pos_780_01 / revenue_600 * 100) if revenue_600 else 0, 2), "unit": "%",
+        #         "accounts_used": ["780.01", "600"]
+        #     },
+        #     "insider_lending_ratio": {"value": round(insider_lending_ratio, 2), "unit": "%"},
+        #     "check_risk_ratio": {"value": round(check_risk_ratio, 2), "unit": "x"},
+            
+        #     "competitor_banks": {
+        #         "102": banks_102,
+        #         "300": banks_300,
+        #         "400": banks_400
+        #     },
+
+        #     "donem_context": {
+        #         "raw": raw_donem,
+        #         "period_months": period_months,
+        #         "period_days": period_days,
+        #         "label": donem_label
+        #     },
+
+        #     "dynamic_mapping": aciklama_map,
+        #     "account_hierarchy": validated_hierarchy
+        # }
+        # ── COMPILE RATIOS & DYNAMIC CONTEXT (FAT PAYLOAD) ──
+ # ── COMPILE RATIOS & DYNAMIC CONTEXT (FAT PAYLOAD) ──
+        # Not: Ham hesaplamalarda (gross_profit, collection_period vb.) lokal değişkenleri kullandık.
+        # "raw_values" içindeki raporlama detaylarında ise bal_named() ile dinamik isimleri çektik.
+        
+        # ── DYNAMIC ACCOUNT FILTERING (For Verifier Existence Check) ──
+        # Sadece bakiyesi olan (mizanda var olan) hesapları filtreliyoruz
+        inv_accounts = [acc for acc in ["150", "151", "152", "153"] if bal(acc) > 0]
+        recv_accounts = [acc for acc in ["120", "121"] if bal(acc) > 0]
+        pay_accounts = [acc for acc in ["320", "321"] if bal(acc) > 0]
+        op_exp_accounts = [acc for acc in ["630", "631", "632"] if bal(acc) > 0]
+        bank_loans_accounts = [acc for acc in ["300", "309", "400"] if bal(acc) > 0]
+        equity_accounts = [acc for acc in ["400", "500", "570"] if bal(acc) > 0] # Example equity components
+
+        # ── COMPILE RATIOS & DYNAMIC CONTEXT (FAT PAYLOAD) ──
         ratios = {
-            "gross_margin": {"value": round(gross_margin, 2), "unit": "%"},
-            "operating_margin": {"value": round(operating_margin, 2), "unit": "%"},
-            "current_ratio": {"value": round(current_ratio, 2), "unit": "x"},
-            "quick_ratio": {"value": round(quick_ratio, 2), "unit": "x"},
-            "collection_period": {"value": round(collection_period, 0), "unit": "days"},
-            "payment_period": {"value": round(payment_period, 0), "unit": "days"},
-            "inventory_period": {"value": round(inventory_period, 0), "unit": "days"},
-            "cash_conversion_cycle": {"value": round(cash_conversion_cycle, 0), "unit": "days"},
-            "debt_to_equity": {"value": round(debt_to_equity, 2), "unit": "x"},
-            "bank_debt_ratio": {"value": round(bank_debt_ratio, 2), "unit": "%"},
-            "financial_expense_ratio": {"value": round(fin_expense_ratio, 2), "unit": "%"},
+            "gross_margin": {
+                "value": round(gross_margin, 2), "unit": "%",
+                "formula": "(Revenue[600] - COGS[620]) / Revenue[600] × 100",
+                "accounts_used": ["600", "620"],
+                "raw_values": {
+                    "revenue_600": bal_named("600"),
+                    "cogs_620": bal_named("620"),
+                    "gross_profit": gross_profit,
+                }
+            },
+            "operating_margin": {
+                "value": round(operating_margin, 2), "unit": "%",
+                "formula": "(Gross Profit - Operating Expenses) / Revenue[600] × 100",
+                "accounts_used": ["600", "620"] + op_exp_accounts,
+                "raw_values": {
+                    "revenue_600": bal_named("600"),
+                    "cogs_620": bal_named("620"),
+                    "op_exp_630": bal_named("630"),
+                    "op_exp_631": bal_named("631"),
+                    "op_exp_632": bal_named("632"),
+                    "operating_profit": operating_profit,
+                }
+            },
+            "current_ratio": {
+                "value": round(current_ratio, 2), "unit": "x",
+                "formula": "Current Assets [1xx] / Short-Term Liabilities [3xx]",
+                "accounts_used": ca_codes + stl_codes,
+                "raw_values": {
+                    "current_assets": current_assets,
+                    "short_term_liabilities": short_term_liab,
+                }
+            },
+            "quick_ratio": {
+                "value": round(quick_ratio, 2), "unit": "x",
+                "formula": "(Current Assets[1xx] - Inventory) / Short-Term Liabilities[3xx]",
+                "accounts_used": ca_codes + inv_accounts,
+                "raw_values": {
+                    "liquid_assets": current_assets - inventory,
+                    "short_term_liabilities": short_term_liab,
+                    "received_checks_101": bal_named("101"),
+                    "given_checks_103": bal_named("103"),
+                    "inventory_total": inventory,
+                }
+            },
+            "collection_period": {
+                "value": round(collection_period, 0), "unit": "days",
+                "formula": f"Trade Receivables / Revenue[600] × {period_days}",
+                "accounts_used": recv_accounts + ["600"],
+                "period_days_used": period_days,
+                "raw_values": {
+                    "trade_receivables": trade_receivables,
+                    "revenue_600": bal_named("600"),
+                }
+            },
+            "payment_period": {
+                "value": round(payment_period, 0), "unit": "days",
+                "formula": f"Trade Payables / COGS[620] × {period_days}",
+                "accounts_used": pay_accounts + ["620"],
+                "period_days_used": period_days,
+                "raw_values": {
+                    "trade_payables": trade_payables,
+                    "cogs_620": bal_named("620"),
+                }
+            },
+            "inventory_period": {
+                "value": round(inventory_period, 0), "unit": "days",
+                "formula": f"Inventory / COGS[620] × {period_days}",
+                "accounts_used": inv_accounts + ["620"],
+                "period_days_used": period_days,
+                "raw_values": {
+                    "total_inventory": inventory,
+                    "cogs_620": bal_named("620")
+                }
+            },
+            "cash_conversion_cycle": {
+                "value": round(cash_conversion_cycle, 0), "unit": "days",
+                "formula": "Collection Period + Inventory Period - Payment Period",
+                "accounts_used": recv_accounts + inv_accounts + pay_accounts + ["600", "620"],
+                "raw_values": {
+                    "collection_period": collection_period,
+                    "inventory_period": inventory_period,
+                    "payment_period": payment_period
+                }
+            },
+            "debt_to_equity": {
+                "value": round(debt_to_equity, 2), "unit": "x",
+                "formula": "Total Liabilities [3xx+4xx] / Equity [5xx]",
+                "accounts_used": stl_codes + equity_accounts,
+                "raw_values": {
+                    "total_liabilities": total_liab,
+                    "total_equity": total_equity,
+                    "sermaye_500": bal_named("500"),
+                    "gecmis_yil_karlari_570": bal_named("570"),
+                }
+            },
+            "bank_debt_ratio": {
+                "value": round(bank_debt_ratio, 2), "unit": "%",
+                "formula": "Bank Loans / Total Liabilities × 100",
+                "accounts_used": bank_loans_accounts,
+                "raw_values": {
+                    "banka_kredileri_kv_300": bal_named("300"),
+                    "diger_mali_borclar_309": bal_named("309"),
+                    "banka_kredileri_uv_400": bal_named("400"),
+                    "total_bank_loans": total_bank_loans,
+                    "total_liabilities": total_liab,
+                }
+            },
+            "financial_expense_ratio": {
+                "value": round(fin_expense_ratio, 2), "unit": "%",
+                "formula": "Financial Expenses [780] / Revenue [600] × 100",
+                "accounts_used": ["780", "600"],
+                "raw_values": {
+                    "finansman_giderleri_780": bal_named("780"),
+                    "revenue_600": bal_named("600"),
+                }
+            },
             "pos_commission_ratio": {
                 "value": round((pos_780_01 / revenue_600 * 100) if revenue_600 else 0, 2), "unit": "%",
-                "accounts_used": ["780.01", "600"]
+                "formula": "POS Commission [780.01] / Revenue [600] × 100",
+                "accounts_used": ["780.01", "600"] if pos_780_01 > 0 else ["600"],
+                "raw_values": {
+                    "pos_komisyon_780_01": bal_named("780.01"),
+                    "revenue_600": bal_named("600"),
+                }
             },
-            "insider_lending_ratio": {"value": round(insider_lending_ratio, 2), "unit": "%"},
-            "check_risk_ratio": {"value": round(check_risk_ratio, 2), "unit": "x"},
-            
+            "insider_lending_ratio": {
+                "value": round(insider_lending_ratio, 2), "unit": "%",
+                "formula": "Due from Shareholders [131] / Total Assets × 100",
+                "accounts_used": ["131"] if insider_lending_131 > 0 else [],
+                "raw_values": {
+                    "insider_lending_131": bal_named("131"),
+                    "total_assets": total_assets
+                }
+            },
+            "check_risk_ratio": {
+                "value": round(check_risk_ratio, 2), "unit": "x",
+                "formula": "Given Checks [103] / Bank Deposits [102]",
+                "accounts_used": ["103", "102"],
+                "raw_values": {
+                    "given_checks_103": bal_named("103"),
+                    "banks_102_total": bal_named("102")
+                }
+            },
             "competitor_banks": {
                 "102": banks_102,
                 "300": banks_300,
                 "400": banks_400
             },
-
+            "account_hierarchy": validated_hierarchy,
+            "dynamic_mapping": aciklama_map,
             "donem_context": {
                 "raw": raw_donem,
                 "period_months": period_months,
                 "period_days": period_days,
-                "label": donem_label
+                "label": donem_label,
             },
-
-            "dynamic_mapping": aciklama_map,
-            "account_hierarchy": validated_hierarchy
         }
+        # ratios = {
+        #     "gross_margin": {
+        #         "value": round(gross_margin, 2), "unit": "%",
+        #         "formula": "(Revenue[600] - COGS[620]) / Revenue[600] × 100",
+        #         "accounts_used": ["600", "620"],
+        #         "raw_values": {
+        #             "revenue_600": bal_named("600"),
+        #             "cogs_620": bal_named("620"),
+        #             "gross_profit": gross_profit,
+        #         }
+        #     },
+        #     "operating_margin": {
+        #         "value": round(operating_margin, 2), "unit": "%",
+        #         "formula": "(Gross Profit - Operating Expenses[630+631+632]) / Revenue[600] × 100",
+        #         "accounts_used": ["600", "620", "630", "631", "632"],
+        #         "raw_values": {
+        #             "revenue_600": bal_named("600"),
+        #             "cogs_620": bal_named("620"),
+        #             "op_exp_630": bal_named("630"),
+        #             "op_exp_631": bal_named("631"),
+        #             "op_exp_632": bal_named("632"),
+        #             "operating_profit": operating_profit,
+        #         }
+        #     },
+        #     "current_ratio": {
+        #         "value": round(current_ratio, 2), "unit": "x",
+        #         "formula": "Current Assets [1xx] / Short-Term Liabilities [3xx]",
+        #         "accounts_used": ca_codes + stl_codes,
+        #         "raw_values": {
+        #             "current_assets": current_assets,
+        #             "short_term_liabilities": short_term_liab,
+        #         }
+        #     },
+        #     "quick_ratio": {
+        #         "value": round(quick_ratio, 2), "unit": "x",
+        #         "formula": "(Current Assets[1xx] - Inventory[15x]) / Short-Term Liabilities[3xx]",
+        #         "accounts_used": ca_codes + ["150", "151", "152", "153"],
+        #         "raw_values": {
+        #             "liquid_assets": current_assets - inventory,
+        #             "short_term_liabilities": short_term_liab,
+        #             "received_checks_101": bal_named("101"),
+        #             "given_checks_103": bal_named("103"),
+        #             "inventory_150": bal_named("150"),
+        #             "inventory_151": bal_named("151"),
+        #             "inventory_152": bal_named("152"),
+        #             "inventory_153": bal_named("153"),
+        #         }
+        #     },
+        #     "collection_period": {
+        #         "value": round(collection_period, 0), "unit": "days",
+        #         "formula": f"Trade Receivables[120+121] / Revenue[600] × {period_days}",
+        #         "accounts_used": ["120", "121", "600"],
+        #         "period_days_used": period_days,
+        #         "raw_values": {
+        #             "trade_receivables_120": bal_named("120"),
+        #             "trade_receivables_121": bal_named("121"),
+        #             "trade_receivables": trade_receivables,
+        #             "revenue_600": bal_named("600"),
+        #         }
+        #     },
+        #     "payment_period": {
+        #         "value": round(payment_period, 0), "unit": "days",
+        #         "formula": f"Trade Payables[320+321] / COGS[620] × {period_days}",
+        #         "accounts_used": ["320", "321", "620"],
+        #         "period_days_used": period_days,
+        #         "raw_values": {
+        #             "trade_payables_320": bal_named("320"),
+        #             "trade_payables_321": bal_named("321"),
+        #             "trade_payables": trade_payables,
+        #             "cogs_620": bal_named("620"),
+        #         }
+        #     },
+        #     "inventory_period": {
+        #         "value": round(inventory_period, 0), "unit": "days",
+        #         "formula": f"Inventory[15x] / COGS[620] × {period_days}",
+        #         "accounts_used": ["150", "151", "152", "153", "620"],
+        #         "period_days_used": period_days,
+        #         "raw_values": {
+        #             "inventory_150": bal_named("150"),
+        #             "inventory_151": bal_named("151"),
+        #             "inventory_152": bal_named("152"),
+        #             "inventory_153": bal_named("153"),
+        #             "total_inventory": inventory,
+        #             "cogs_620": bal_named("620")
+        #         }
+        #     },
+        #     "cash_conversion_cycle": {
+        #         "value": round(cash_conversion_cycle, 0), "unit": "days",
+        #         "formula": "Collection Period + Inventory Period - Payment Period",
+        #         "accounts_used": ["120", "121", "150", "151", "152", "153", "320", "321", "600", "620"],
+        #         "raw_values": {
+        #             "collection_period": collection_period,
+        #             "inventory_period": inventory_period,
+        #             "payment_period": payment_period
+        #         }
+        #     },
+        #     "debt_to_equity": {
+        #         "value": round(debt_to_equity, 2), "unit": "x",
+        #         "formula": "Total Liabilities [3xx+4xx] / Equity [5xx]",
+        #         "accounts_used": stl_codes + ["400", "500", "570"],
+        #         "raw_values": {
+        #             "total_liabilities": total_liab,
+        #             "total_equity": total_equity,
+        #             "sermaye_500": bal_named("500"),
+        #             "gecmis_yil_karlari_570": bal_named("570"),
+        #         }
+        #     },
+        #     "bank_debt_ratio": {
+        #         "value": round(bank_debt_ratio, 2), "unit": "%",
+        #         "formula": "Bank Loans[300+309+400] / Total Liabilities × 100",
+        #         "accounts_used": ["300", "309", "400"],
+        #         "raw_values": {
+        #             "banka_kredileri_kv_300": bal_named("300"),
+        #             "diger_mali_borclar_309": bal_named("309"),
+        #             "banka_kredileri_uv_400": bal_named("400"),
+        #             "total_bank_loans": total_bank_loans,
+        #             "total_liabilities": total_liab,
+        #         }
+        #     },
+        #     "financial_expense_ratio": {
+        #         "value": round(fin_expense_ratio, 2), "unit": "%",
+        #         "formula": "Financial Expenses [780] / Revenue [600] × 100",
+        #         "accounts_used": ["780", "600"],
+        #         "raw_values": {
+        #             "finansman_giderleri_780": bal_named("780"),
+        #             "revenue_600": bal_named("600"),
+        #         }
+        #     },
+        #     "pos_commission_ratio": {
+        #         "value": round((pos_780_01 / revenue_600 * 100) if revenue_600 else 0, 2), "unit": "%",
+        #         "formula": "POS Commission [780.01] / Revenue [600] × 100",
+        #         "accounts_used": ["780.01", "600"],
+        #         "raw_values": {
+        #             "pos_komisyon_780_01": bal_named("780.01"),
+        #             "revenue_600": bal_named("600"),
+        #         }
+        #     },
+        #     "insider_lending_ratio": {
+        #         "value": round(insider_lending_ratio, 2), "unit": "%",
+        #         "formula": "Due from Shareholders [131] / Total Assets × 100",
+        #         "accounts_used": ["131"],
+        #         "raw_values": {
+        #             "insider_lending_131": bal_named("131"),
+        #             "total_assets": total_assets
+        #         }
+        #     },
+        #     "check_risk_ratio": {
+        #         "value": round(check_risk_ratio, 2), "unit": "x",
+        #         "formula": "Given Checks [103] / Bank Deposits [102]",
+        #         "accounts_used": ["103", "102"],
+        #         "raw_values": {
+        #             "given_checks_103": bal_named("103"),
+        #             "banks_102_total": bal_named("102")
+        #         }
+        #     },
+            
+        #     # Competitor data for downstream Strategist
+        #     "competitor_banks": {
+        #         "102": banks_102,
+        #         "300": banks_300,
+        #         "400": banks_400
+        #     },
+            
+        #     # Hierarchical account tree for downstream agents
+        #     "account_hierarchy": validated_hierarchy,
+            
+        #     # Dynamic mapping for reference
+        #     "dynamic_mapping": aciklama_map,
+            
+        #     # Temporal context
+        #     "donem_context": {
+        #         "raw": raw_donem,
+        #         "period_months": period_months,
+        #         "period_days": period_days,
+        #         "label": donem_label,
+        #     },
+        # }
 
+        # Mevcut durumu al, yeni oluşturulanla .update yap.
         current_ratios = state.get("financial_ratios", {})
         if isinstance(current_ratios, dict):
             current_ratios.update(ratios)
         else:
             current_ratios = ratios
-
         # ── LLM INTERPRETATION ──
         try:
             summary = "\n".join(f"- {n}: {d['value']}{d['unit']}" for n, d in ratios.items() if isinstance(d, dict) and "value" in d)

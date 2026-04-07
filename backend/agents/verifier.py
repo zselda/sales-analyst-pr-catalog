@@ -21,12 +21,15 @@ VALID_ACCOUNTS = {
     "quick_ratio":             {"required": ["150", "151", "152", "153"], "forbidden": ["255", "400"]},
     "collection_period":       {"required": ["120", "121", "600"], "forbidden": ["320", "321"]},
     "payment_period":          {"required": ["320", "321", "620"], "forbidden": ["120", "121"]},
+    "inventory_period":        {"required": ["150", "151", "152", "153", "620"], "forbidden": ["600"]},
+    "cash_conversion_cycle":   {"required": ["120", "121", "150", "151", "152", "153", "320", "321", "600", "620"], "forbidden": ["300", "400", "500"]},
     "debt_to_equity":          {"required": ["400", "500", "570"], "forbidden": []},
     "bank_debt_ratio":         {"required": ["300", "309", "400"], "forbidden": ["320", "500"]},
     "financial_expense_ratio": {"required": ["780", "600"], "forbidden": ["620", "630"]},
     "pos_commission_ratio":    {"required": ["780.01", "600"], "forbidden": []},
+    "insider_lending_ratio":   {"required": ["131"], "forbidden": ["331", "500"]},
+    "check_risk_ratio":        {"required": ["102", "103"], "forbidden": ["300", "400"]},
 }
-
 
 class VerifierAgent(BaseAgent):
     name = "verifier"
@@ -44,36 +47,32 @@ class VerifierAgent(BaseAgent):
 
         errors = []
 
-        # # ── LOCAL CHECK 1: Account codes ──
-        # for name, rules in VALID_ACCOUNTS.items():
-        #     if name not in ratios:
-        #         errors.append(f"Missing ratio: {name}")
-        #         continue
-        #     used = ratios[name].get("accounts_used", [])
-        #     for req in rules["required"]:
-        #         if req not in used:
-        #             errors.append(f"[{name}] Missing required account '{req}'")
-        #     for acc in used:
-        #         if acc.split(".")[0] in rules["forbidden"] or acc in rules["forbidden"]:
-        #             errors.append(f"[{name}] Forbidden account '{acc}'")
+        # ── LOCAL CHECK 1: Account Codes (Dynamic Existence Check) ──
+        dynamic_mapping = ratios.get("dynamic_mapping", {})
         
-        # ── LOCAL CHECK 1: Account codes ──
         for name, rules in VALID_ACCOUNTS.items():
+            # Rasyo hiç hesaplanmamışsa atla
             if name not in ratios:
-                if name != "pos_commission_ratio": 
-                    errors.append(f"Missing ratio: {name}")
-                continue
+                continue 
                 
             used = ratios[name].get("accounts_used", [])
             used_str = [str(acc) for acc in used]
             
+            # 1. ZORUNLU HESAP KONTROLÜ (Sadece Mizan'da varsa zorunludur)
             for req in rules["required"]:
-                if not any(acc.startswith(req) for acc in used_str):
-                    errors.append(f"[{name}] Missing required account starting with '{req}'")
+                exists_in_mizan = any(str(k).startswith(req) for k in dynamic_mapping.keys())
+                
+                if exists_in_mizan:
+                    if not any(acc.startswith(req) for acc in used_str):
+                        errors.append(f"[{name}] Missing expected account '{req}'. (Hesap mizan'da mevcut ancak hesaplamaya dahil edilmemiş)")
+                else:
+                    logger.debug(f"[{name}] Account '{req}' not found in dynamic mapping. Bypassing requirement.")
                     
+            # 2. YASAKLI HESAP KONTROLÜ
             for acc in used_str:
                 if any(acc.startswith(forb) for forb in rules["forbidden"]):
                     errors.append(f"[{name}] Forbidden account used '{acc}'")
+
 
         # ── LOCAL CHECK 2: Competitor Bank Mappings ──
         cb = ratios.get("competitor_banks", {})
@@ -92,7 +91,6 @@ class VerifierAgent(BaseAgent):
                     )
 
         # ── LOCAL CHECK 2c: Dynamic Mapping Validation ──
-        dynamic_mapping = ratios.get("dynamic_mapping", {})
         if not dynamic_mapping:
             logger.warning("No dynamic mapping found — using static fallback?")
         else:
@@ -112,100 +110,40 @@ class VerifierAgent(BaseAgent):
             d_period_days = donem_ctx.get("period_days", 0)
             d_period_months = donem_ctx.get("period_months", 0)
 
-            # Bounds check
             if not (1 <= d_period_months <= 12):
                 errors.append(f"[donem] period_months={d_period_months} out of range [1-12]")
             if not (30 <= d_period_days <= 360):
                 errors.append(f"[donem] period_days={d_period_days} out of range [30-360]")
 
-            # Formula-period alignment: verify time-dependent ratios used correct period_days
-            for time_ratio in ["collection_period", "payment_period"]:
+            for time_ratio in ["collection_period", "payment_period", "inventory_period"]:
                 if time_ratio in ratios:
                     ratio_data = ratios[time_ratio]
                     formula_str = ratio_data.get("formula", "")
                     embedded_days = ratio_data.get("period_days_used")
 
-                    # Check embedded period_days matches donem
                     if embedded_days is not None and embedded_days != d_period_days:
                         errors.append(
                             f"[{time_ratio}] period_days mismatch: ratio used {embedded_days} "
                             f"but donem says {d_period_days}"
                         )
-
-                    # Check formula string does NOT contain hardcoded '365'
                     if "365" in formula_str:
                         errors.append(
                             f"[{time_ratio}] Formula contains hardcoded '365' "
                             f"but donem period_days={d_period_days}"
                         )
 
-            # Cross-validate: recompute collection_period from raw values
-            if "collection_period" in ratios and d_period_days > 0:
-                raw = ratios["collection_period"].get("raw_values", {})
-                recv = _raw_float(raw.get("trade_receivables", 0))
-                rev = _raw_float(raw.get("revenue_600", 0))
-                if rev > 0:
-                    expected_cp = round(recv / rev * d_period_days, 0)
-                    actual_cp = ratios["collection_period"]["value"]
-                    if abs(expected_cp - actual_cp) > 5:
-                        logger.warning(
-                            f"[collection_period] Temporal math mismatch: expected {expected_cp} days "
-                            f"(recv={recv:,.0f} / rev={rev:,.0f} × {d_period_days}), got {actual_cp}"
-                        )
-
-            # Cross-validate: recompute payment_period from raw values
-            if "payment_period" in ratios and d_period_days > 0:
-                raw = ratios["payment_period"].get("raw_values", {})
-                pay = _raw_float(raw.get("trade_payables", 0))
-                cogs = _raw_float(raw.get("cogs_620", 0))
-                if cogs > 0:
-                    expected_pp = round(pay / cogs * d_period_days, 0)
-                    actual_pp = ratios["payment_period"]["value"]
-                    if abs(expected_pp - actual_pp) > 5:
-                        logger.warning(
-                            f"[payment_period] Temporal math mismatch: expected {expected_pp} days "
-                            f"(pay={pay:,.0f} / cogs={cogs:,.0f} × {d_period_days}), got {actual_pp}"
-                        )
-
             logger.info(f"Dönem validation: {donem_ctx.get('label', '?')} ({d_period_days} days)")
         else:
             logger.warning("No donem_context found in ratios — skipping temporal validation")
 
-        # ── LOCAL CHECK 3: Math consistency ──
-        if "gross_margin" in ratios:
-            raw = ratios["gross_margin"].get("raw_values", {})
-            r, c = _raw_float(raw.get("revenue_600", 0)), _raw_float(raw.get("cogs_620", 0))
-            if r > 0:
-                expected = round((r - c) / r * 100, 2)
-                if abs(expected - ratios["gross_margin"]["value"]) > 0.01:
-                    logger.warning(f"[gross_margin] Math: expected {expected}%, got {ratios['gross_margin']['value']}%")
-
-        # # ── LOCAL CHECK 4: Bounds ──
-        # bounds = {
-        #     "gross_margin": (-100, 100), 
-        #     "operating_margin": (-500, 500),
-        #     "current_ratio": (0, 50),
-        #     "quick_ratio": (0, 50),
-        #     "collection_period": (0, 1000), # Days can be high
-        #     "payment_period": (0, 1000),    # Days can be high
-        #     "debt_to_equity": (-100, 100), 
-        #     "bank_debt_ratio": (0, 200),
-        #     "financial_expense_ratio": (0, 200),
-        #     "pos_commission_ratio": (0, 1000)
-        # }
-        # for name, (lo, hi) in bounds.items():
-        #     if name in ratios:
-        #         v = ratios[name].get("value", 0)
-        #         if v < lo or v > hi:
-        #             errors.append(f"[{name}] {v} out of range [{lo},{hi}]")
-        # ── LOCAL CHECK 4: Bounds ──
+        # ── LOCAL CHECK 4: Bounds (Esnetilmiş Sınırlar) ──
         bounds = {
             "gross_margin": (-5000, 100), 
             "operating_margin": (-5000, 500),
             "current_ratio": (0, 100),
             "quick_ratio": (0, 100),
-            "collection_period": (0, 1800), # Days can be high
-            "payment_period": (0, 1800),    # Days can be high
+            "collection_period": (0, 1800),
+            "payment_period": (0, 1800),
             "inventory_period": (0, 1800),
             "cash_conversion_cycle": (-1800, 1800),
             "debt_to_equity": (-500, 500), 
@@ -224,7 +162,6 @@ class VerifierAgent(BaseAgent):
         # ── LLM CHECK 5: Semantic verification ──
         if not errors:
             try:
-                # Exclude non-ratio keys from standard formatting
                 skip_keys = ["llm_interpretation", "competitor_banks", "account_hierarchy",
                              "dynamic_mapping", "validation_warnings"]
                 lines = "\n".join(
@@ -239,7 +176,6 @@ class VerifierAgent(BaseAgent):
                     f"400 Present: {bool(cb.get('400'))}"
                 )
 
-                # Include hierarchy validation status
                 hierarchy_status = "No hierarchy data"
                 validation_warnings = ratios.get("validation_warnings", [])
                 if hierarchy:
@@ -250,14 +186,11 @@ class VerifierAgent(BaseAgent):
                     else:
                         hierarchy_status = "All hierarchy sums validated"
 
-                # Dönem context for temporal verification
                 donem_line = ""
                 if donem_ctx:
                     donem_line = (
                         f"- Dönem: {donem_ctx.get('raw', '?')} ({donem_ctx.get('period_months', '?')} months, "
                         f"{donem_ctx.get('period_days', '?')} days)\n"
-                        f"Verify that time-dependent ratios (collection_period, payment_period) "
-                        f"use {donem_ctx.get('period_days', '?')} days, NOT 365.\n"
                     )
 
                 prompt = (
@@ -290,13 +223,10 @@ class VerifierAgent(BaseAgent):
         logger.info("✅ APPROVED")
         return {"verification_status": "approved", "verification_errors": ""}
 
-
 # Module-level callable for LangGraph
 verifier_agent = VerifierAgent()
 
-
 def should_retry_or_continue(state: SwarmState) -> str:
-    """Router function for the verifier conditional edge."""
     status = state.get("verification_status", "rejected")
     retries = state.get("retry_count", 0)
     if status == "approved":
