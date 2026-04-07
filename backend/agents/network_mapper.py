@@ -136,7 +136,27 @@ class NetworkMapperAgent(BaseAgent):
             "weight": attrs.get("weight", 0), "label": attrs.get("label", ""),
             "type": attrs.get("type", ""), "color": attrs.get("color", "#999"),
         } for src, tgt, attrs in G.edges(data=True)]
+        
+        total_receivables = sum(n["balance"] for n in nodes if n["type"] == "customer")
+        total_payables = sum(n["balance"] for n in nodes if n["type"] == "supplier")
+        
+        max_customer_ratio = 0
+        if total_receivables > 0:
+            top_customer = max([n for n in nodes if n["type"] == "customer"], key=lambda x: x["balance"], default=None)
+            if top_customer:
+                max_customer_ratio = top_customer["balance"] / total_receivables
 
+        # 
+        max_supplier_ratio = 0
+        if total_payables > 0:
+            top_supplier = max([n for n in nodes if n["type"] == "supplier"], key=lambda x: x["balance"], default=None)
+            if top_supplier:
+                max_supplier_ratio = top_supplier["balance"] / total_payables
+
+        # %40 ve üzeri bağımlılık varsa Yoğunlaşma Bayrağını (Flag) True yap
+        concentration_flag = bool(max_customer_ratio > 0.40 or max_supplier_ratio > 0.40)
+
+        
         network = {
             "nodes": nodes,
             "edges": edges,
@@ -149,6 +169,9 @@ class NetworkMapperAgent(BaseAgent):
                 "total_receivables": float(customers_df["debit"].sum()),
                 "total_payables": float(suppliers_df["credit"].sum()),
                 "total_bank_deposits": float(banks_df["debit"].sum()),
+                "concentration_flag": concentration_flag, # STRATEJİST İÇİN KRİTİK VERİ
+                "max_customer_dependency_ratio": max_customer_ratio,
+                "max_supplier_dependency_ratio": max_supplier_ratio
             },
         }
 

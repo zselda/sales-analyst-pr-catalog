@@ -293,7 +293,7 @@ def predict_sector(customers: list, suppliers: list) -> str:
     prompt = f"Based on these business partners, what sector does this company operate in?\n\n{entity_text}"
 
     try:
-        sector = invoke_llm(system_prompt, prompt, temperature=0.1, max_tokens=20)
+        sector = invoke_llm(system_prompt, prompt, temperature=0.1, max_tokens=256)
         # Clean: take first line, strip quotes/punctuation
         sector = sector.strip().split("\n")[0].strip().strip('"').strip("'").strip(".")
         if len(sector) > 40:
