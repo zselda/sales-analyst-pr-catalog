@@ -1043,7 +1043,12 @@ class QuantAnalystAgent(BaseAgent):
         fin_exp_780 = abs(bal("780"))
         fin_expense_ratio = (fin_exp_780 / revenue_600 * 100) if revenue_600 else 0
         pos_780_01 = abs(bal("780.01"))
-
+        
+        validated_hierarchy = {}
+        # Sadece ana hesaplar için (örneğin 102, 120, 320, 600) doğrulama statülerini ekle
+        for main_code in ["102", "120", "320", "600"]:
+            if bal(main_code) > 0:
+                validated_hierarchy[main_code] = bal_named(main_code)
         # ── COMPILE RATIOS & DYNAMIC CONTEXT ──
         ratios = {
             "gross_margin": {"value": round(gross_margin, 2), "unit": "%"},
@@ -1057,6 +1062,10 @@ class QuantAnalystAgent(BaseAgent):
             "debt_to_equity": {"value": round(debt_to_equity, 2), "unit": "x"},
             "bank_debt_ratio": {"value": round(bank_debt_ratio, 2), "unit": "%"},
             "financial_expense_ratio": {"value": round(fin_expense_ratio, 2), "unit": "%"},
+            "pos_commission_ratio": {
+                "value": round((pos_780_01 / revenue_600 * 100) if revenue_600 else 0, 2), "unit": "%",
+                "accounts_used": ["780.01", "600"]
+            },
             "insider_lending_ratio": {"value": round(insider_lending_ratio, 2), "unit": "%"},
             "check_risk_ratio": {"value": round(check_risk_ratio, 2), "unit": "x"},
             
@@ -1071,8 +1080,17 @@ class QuantAnalystAgent(BaseAgent):
                 "period_months": period_months,
                 "period_days": period_days,
                 "label": donem_label
-            }
+            },
+
+            "dynamic_mapping": aciklama_map,
+            "account_hierarchy": validated_hierarchy
         }
+
+        current_ratios = state.get("financial_ratios", {})
+        if isinstance(current_ratios, dict):
+            current_ratios.update(ratios)
+        else:
+            current_ratios = ratios
 
         # ── LLM INTERPRETATION ──
         try:
@@ -1114,7 +1132,9 @@ class QuantAnalystAgent(BaseAgent):
             logger.warning(f"LLM skipped: {e}")
             llm_text = "LLM interpretation unavailable."
 
-        ratios["llm_interpretation"] = llm_text
-        return {"financial_ratios": ratios, "retry_count": retry_count + 1}
-
+        # ratios["llm_interpretation"] = llm_text
+        # return {"financial_ratios": ratios, "retry_count": retry_count + 1}
+        current_ratios["llm_interpretation"] = llm_text
+        return {"financial_ratios": current_ratios, "retry_count": retry_count + 1}
+        
 quant_analyst_agent = QuantAnalystAgent()

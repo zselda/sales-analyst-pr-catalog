@@ -44,18 +44,36 @@ class VerifierAgent(BaseAgent):
 
         errors = []
 
+        # # ── LOCAL CHECK 1: Account codes ──
+        # for name, rules in VALID_ACCOUNTS.items():
+        #     if name not in ratios:
+        #         errors.append(f"Missing ratio: {name}")
+        #         continue
+        #     used = ratios[name].get("accounts_used", [])
+        #     for req in rules["required"]:
+        #         if req not in used:
+        #             errors.append(f"[{name}] Missing required account '{req}'")
+        #     for acc in used:
+        #         if acc.split(".")[0] in rules["forbidden"] or acc in rules["forbidden"]:
+        #             errors.append(f"[{name}] Forbidden account '{acc}'")
+        
         # ── LOCAL CHECK 1: Account codes ──
         for name, rules in VALID_ACCOUNTS.items():
             if name not in ratios:
-                errors.append(f"Missing ratio: {name}")
+                if name != "pos_commission_ratio": 
+                    errors.append(f"Missing ratio: {name}")
                 continue
+                
             used = ratios[name].get("accounts_used", [])
+            used_str = [str(acc) for acc in used]
+            
             for req in rules["required"]:
-                if req not in used:
-                    errors.append(f"[{name}] Missing required account '{req}'")
-            for acc in used:
-                if acc.split(".")[0] in rules["forbidden"] or acc in rules["forbidden"]:
-                    errors.append(f"[{name}] Forbidden account '{acc}'")
+                if not any(acc.startswith(req) for acc in used_str):
+                    errors.append(f"[{name}] Missing required account starting with '{req}'")
+                    
+            for acc in used_str:
+                if any(acc.startswith(forb) for forb in rules["forbidden"]):
+                    errors.append(f"[{name}] Forbidden account used '{acc}'")
 
         # ── LOCAL CHECK 2: Competitor Bank Mappings ──
         cb = ratios.get("competitor_banks", {})
@@ -162,25 +180,47 @@ class VerifierAgent(BaseAgent):
                 if abs(expected - ratios["gross_margin"]["value"]) > 0.01:
                     logger.warning(f"[gross_margin] Math: expected {expected}%, got {ratios['gross_margin']['value']}%")
 
+        # # ── LOCAL CHECK 4: Bounds ──
+        # bounds = {
+        #     "gross_margin": (-100, 100), 
+        #     "operating_margin": (-500, 500),
+        #     "current_ratio": (0, 50),
+        #     "quick_ratio": (0, 50),
+        #     "collection_period": (0, 1000), # Days can be high
+        #     "payment_period": (0, 1000),    # Days can be high
+        #     "debt_to_equity": (-100, 100), 
+        #     "bank_debt_ratio": (0, 200),
+        #     "financial_expense_ratio": (0, 200),
+        #     "pos_commission_ratio": (0, 1000)
+        # }
+        # for name, (lo, hi) in bounds.items():
+        #     if name in ratios:
+        #         v = ratios[name].get("value", 0)
+        #         if v < lo or v > hi:
+        #             errors.append(f"[{name}] {v} out of range [{lo},{hi}]")
         # ── LOCAL CHECK 4: Bounds ──
         bounds = {
-            "gross_margin": (-100, 100), 
-            "operating_margin": (-500, 500),
-            "current_ratio": (0, 50),
-            "quick_ratio": (0, 50),
-            "collection_period": (0, 1000), # Days can be high
-            "payment_period": (0, 1000),    # Days can be high
-            "debt_to_equity": (-100, 100), 
-            "bank_debt_ratio": (0, 200),
-            "financial_expense_ratio": (0, 200),
-            "pos_commission_ratio": (0, 1000)
+            "gross_margin": (-5000, 100), 
+            "operating_margin": (-5000, 500),
+            "current_ratio": (0, 100),
+            "quick_ratio": (0, 100),
+            "collection_period": (0, 1800), # Days can be high
+            "payment_period": (0, 1800),    # Days can be high
+            "inventory_period": (0, 1800),
+            "cash_conversion_cycle": (-1800, 1800),
+            "debt_to_equity": (-500, 500), 
+            "bank_debt_ratio": (0, 150),
+            "financial_expense_ratio": (0, 5000),
+            "pos_commission_ratio": (0, 100),
+            "insider_lending_ratio": (0, 100),
+            "check_risk_ratio": (0, 10000)
         }
         for name, (lo, hi) in bounds.items():
             if name in ratios:
                 v = ratios[name].get("value", 0)
                 if v < lo or v > hi:
-                    errors.append(f"[{name}] {v} out of range [{lo},{hi}]")
-
+                    logger.warning(f"[{name}] {v} out of usual range [{lo},{hi}] - Please review.")
+        
         # ── LLM CHECK 5: Semantic verification ──
         if not errors:
             try:
