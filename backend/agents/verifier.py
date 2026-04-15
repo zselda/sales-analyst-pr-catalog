@@ -230,10 +230,10 @@ def should_retry_or_continue(state: SwarmState) -> str:
     status = state.get("verification_status", "rejected")
     retries = state.get("retry_count", 0)
     if status == "approved":
-        logger.info("[Router] → network_mapper")
-        return "network_mapper"
+        logger.info("[Router] → product_analyst")
+        return "product_analyst"
     if retries >= MAX_RETRIES:
         logger.info("[Router] Max retries → continue")
-        return "network_mapper"
+        return "product_analyst"
     logger.info(f"[Router] REJECTED → retry #{retries}")
     return "quant_analyst"

@@ -108,6 +108,7 @@ def run_pipeline(file_path: str, generate_turkish: bool = False, output_dir: str
         "retry_count": 0,
         "network_data": None,
         "strategy_report": None,
+        "product_signals": None,
         "translated_report": None,
         "report_language": "TR" if generate_turkish else "EN",
         "chat_history": [],

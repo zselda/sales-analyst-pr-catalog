@@ -3,13 +3,14 @@ LangGraph Agent Orchestration
 ===============================
 Wires agents into a LangGraph StateGraph with:
 - Verifier retry loop
+- Product analyst for banking product signal extraction
 - Network mapper for entity graph
 - Strategist for final sales report
 
 Architecture:
   START → data_ingestion → quant_analyst → verifier
                                             ↓ (conditional)
-                              approved → network_mapper → strategist → END
+                              approved → product_analyst → network_mapper → strategist → END
                               rejected → quant_analyst (loop back)
 """
 
@@ -22,6 +23,7 @@ from agents.state import SwarmState
 from agents.data_ingestion import data_ingestion_agent
 from agents.quant_analyst import quant_analyst_agent
 from agents.verifier import verifier_agent, should_retry_or_continue
+from agents.product_analyst import product_analyst_agent
 from agents.network_mapper import network_mapper_agent
 from agents.strategist import sales_strategist_agent
 from agents.translator import translator_agent
@@ -29,11 +31,8 @@ from agents.translator import translator_agent
 logger = logging.getLogger("swarm.graph")
 
 
-
-
-
 def _route_after_verification(state: SwarmState) -> str:
-    """Router: approved → fan_out (parallel), rejected → quant_analyst (retry)."""
+    """Router: approved → product_analyst (then network_mapper), rejected → quant_analyst (retry)."""
     return should_retry_or_continue(state)
 
 
@@ -42,23 +41,25 @@ def build_swarm_graph() -> StateGraph:
     Build and compile the multi-agent swarm graph.
 
     Architecture:
-    ┌───────────────────────────────────────────────────┐
-    │  START                                             │
-    │    ↓                                               │
-    │  [data_ingestion] ── Standardize Mizan data        │
-    │    ↓                                               │
-    │  [quant_analyst] ─── Calculate financial ratios ◄─┐│
-    │    ↓                                              ││
-    │  [verifier] ──────── Check account codes + math   ││
-    │    ↓                                              ││
-    │  {conditional} ───── rejected? ───────────────────┘│
-    │    ↓ approved                                      │
-    │  [network_mapper] ── Build entity graph            │
-    │    ↓                                               │
-    │  [strategist] ────── Generate sales strategy       │
-    │    ↓                                               │
-    │  END                                               │
-    └───────────────────────────────────────────────────┘
+    ┌───────────────────────────────────────────────────────────┐
+    │  START                                                     │
+    │    ↓                                                       │
+    │  [data_ingestion] ── Standardize Mizan data                │
+    │    ↓                                                       │
+    │  [quant_analyst] ─── Calculate financial ratios ◄─────────┐│
+    │    ↓                                                      ││
+    │  [verifier] ──────── Check account codes + math           ││
+    │    ↓                                                      ││
+    │  {conditional} ───── rejected? ───────────────────────────┘│
+    │    ↓ approved                                              │
+    │  [product_analyst] ─ Extract product signals               │
+    │    ↓                                                       │
+    │  [network_mapper] ── Build entity graph                    │
+    │    ↓                                                       │
+    │  [strategist] ────── Generate ING Bank sales strategy      │
+    │    ↓                                                       │
+    │  END                                                       │
+    └───────────────────────────────────────────────────────────┘
     """
 
     builder = StateGraph(SwarmState)
@@ -67,6 +68,7 @@ def build_swarm_graph() -> StateGraph:
     builder.add_node("data_ingestion", data_ingestion_agent)
     builder.add_node("quant_analyst", quant_analyst_agent)
     builder.add_node("verifier", verifier_agent)
+    builder.add_node("product_analyst", product_analyst_agent)
     builder.add_node("network_mapper", network_mapper_agent)
     builder.add_node("strategist", sales_strategist_agent)
 
@@ -75,17 +77,18 @@ def build_swarm_graph() -> StateGraph:
     builder.add_edge("data_ingestion", "quant_analyst")
     builder.add_edge("quant_analyst", "verifier")
 
-    # Verifier conditional: approved → network_mapper, rejected → retry
+    # Verifier conditional: approved → product_analyst, rejected → retry
     builder.add_conditional_edges(
         "verifier",
         _route_after_verification,
         {
-            "network_mapper": "network_mapper",
+            "product_analyst": "product_analyst",
             "quant_analyst": "quant_analyst",
         }
     )
 
-    # network_mapper → strategist → END
+    # product_analyst → network_mapper → strategist → END
+    builder.add_edge("product_analyst", "network_mapper")
     builder.add_edge("network_mapper", "strategist")
     builder.add_edge("strategist", END)
 
@@ -110,7 +113,7 @@ def build_standalone_graph(generate_turkish: bool = False):
     Architecture (with translation):
       START → data_ingestion → quant_analyst → verifier
                                                 ↓ (conditional)
-                                  approved → network_mapper → strategist → translator → END
+                                  approved → product_analyst → network_mapper → strategist → translator → END
                                   rejected → quant_analyst (loop back)
 
     Architecture (without translation):
@@ -122,6 +125,7 @@ def build_standalone_graph(generate_turkish: bool = False):
     builder.add_node("data_ingestion", data_ingestion_agent)
     builder.add_node("quant_analyst", quant_analyst_agent)
     builder.add_node("verifier", verifier_agent)
+    builder.add_node("product_analyst", product_analyst_agent)
     builder.add_node("network_mapper", network_mapper_agent)
     builder.add_node("strategist", sales_strategist_agent)
 
@@ -135,11 +139,12 @@ def build_standalone_graph(generate_turkish: bool = False):
         "verifier",
         _route_after_verification,
         {
-            "network_mapper": "network_mapper",
+            "product_analyst": "product_analyst",
             "quant_analyst": "quant_analyst",
         }
     )
 
+    builder.add_edge("product_analyst", "network_mapper")
     builder.add_edge("network_mapper", "strategist")
 
     if generate_turkish:

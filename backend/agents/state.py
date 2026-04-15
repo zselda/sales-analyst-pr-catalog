@@ -46,6 +46,7 @@ class SwarmState(TypedDict):
     retry_count: int
     network_data: Optional[dict]
     strategy_report: Optional[str]
+    product_signals: Optional[dict]
     translated_report: Optional[str]
     report_language: Optional[str]
     chat_history: Optional[list]

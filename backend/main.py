@@ -207,6 +207,7 @@ async def run_swarm(request: RunSwarmRequest):
             "verification_status": None, "verification_errors": "",
             "retry_count": 0,
             "network_data": None, "strategy_report": None,
+            "product_signals": None,
             "chat_history": [], "chat_response": None,
             # Observability
             "agent_metrics": {},
@@ -241,6 +242,7 @@ async def run_swarm(request: RunSwarmRequest):
             "verification_errors": result.get("verification_errors", ""),
             "retry_count": result.get("retry_count", 0),
             "network_data": result.get("network_data", {}),
+            "product_signals": result.get("product_signals", {}),
             "strategy_report": result.get("strategy_report", ""),
             "evaluation": eval_result,
             "agent_metrics": result.get("agent_metrics", {}),
