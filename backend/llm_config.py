@@ -25,7 +25,7 @@ logger = logging.getLogger("swarm.llm")
 
 # ── Configuration ──────────────────────────────────────────────────
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "AIzaSyC679Ox8kJZi6kks2F9MVgfOrNAq5tyifU")
-MODEL_NAME = os.environ.get("LLM_MODEL_NAME", "gemma-3-27b-it")
+MODEL_NAME = os.environ.get("LLM_MODEL_NAME", "gemini-2.5-flash")
 MAX_RETRIES = int(os.environ.get("LLM_MAX_RETRIES", "3"))
 REQUEST_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "30"))
 
@@ -62,16 +62,15 @@ def invoke_llm(
     """
     global _total_llm_calls, _total_tokens_used
 
-    combined = f"<ROLE>\n{system_prompt}\n</ROLE>\n\n<TASK>\n{user_prompt}\n</TASK>"
-
     last_error = None
     for attempt in range(1, retries + 1):
         try:
             start_time = time.monotonic()
             resp = _client.models.generate_content(
                 model=MODEL_NAME,
-                contents=combined,
+                contents=user_prompt,
                 config=genai.types.GenerateContentConfig(
+                    system_instruction=system_prompt,
                     temperature=temperature,
                     max_output_tokens=max_tokens,
                 ),
@@ -82,7 +81,7 @@ def invoke_llm(
             if not text:
                 raise ValueError(f"LLM returned empty response or was blocked. Response object: {resp}")
                 
-            estimated_tokens = len(text.split()) + len(combined.split())
+            estimated_tokens = len(text.split()) + len(system_prompt.split()) + len(user_prompt.split())
 
             _total_llm_calls += 1
             _total_tokens_used += estimated_tokens
@@ -216,10 +215,14 @@ STRATEGY_AGENT_SYSTEM_PROMPT = (
     "- TEMPORAL AWARENESS: Explicitly state the Data Period. Annualize flow metrics when assessing credit limits.\n"
     "- Output ONLY the final Markdown report. No conversational filler.\n\n"
 
-    "PRODUCT SIGNALS INTELLIGENCE (NEW):\n"
+    "PRODUCT SIGNALS INTELLIGENCE (ENHANCED):\n"
     "You will receive PRODUCT SIGNALS data from the Product Analyst showing the company's banking product usage "
-    "(balance & volume) across: Loans, POS/VPOS, DBS, Supplier Finance, Corporate Cards, Fleet/Insurance, "
-    "Checks, Trade Finance, FX/SWIFT, Payroll. Use these signals to quantify ING cross-sell opportunities.\n\n"
+    "across ALL 5 COLUMNS (credit, debit, balance_debit, balance_credit, volume) for: Loans, POS/VPOS, DBS, "
+    "Supplier Finance, Corporate Cards, Fleet/Insurance, Checks, Trade Finance, FX/SWIFT, Payroll.\n"
+    "- Use the company's SECTOR to prioritize relevant products.\n"
+    "- Follow IF → THINKING → ACTION → PROPOSAL reasoning for each product opportunity.\n"
+    "- Only reference sub-account codes/names explicitly provided in the data. DO NOT invent.\n"
+    "- You will also receive a compressed JSON payload with KPIs and competitor bank data.\n\n"
 
     "ECOSYSTEM & NETWORK RULE (CRITICAL):\n"
     "When interpreting COMMERCIAL NETWORK data, look for Concentration Risk. If concentrated:\n"
@@ -228,15 +231,16 @@ STRATEGY_AGENT_SYSTEM_PROMPT = (
 
     "You MUST structure your report into exactly these 8 sections:\n"
     "1. EXECUTIVE SUMMARY: Data Period, KPI dashboard, 3-sentence assessment, top 3 priorities.\n"
-    "2. FINANCIAL HEALTH & CASH CYCLE ANALYSIS: Profitability, EBITDA, Cash Conversion Cycle, Transactional Costs.\n"
-    "3. HIDDEN RISKS, CAPITAL LEAKAGE & CONCENTRATION: Insider Lending (131/331), Check Risk (103/102), Network concentration.\n"
-    "4. COMPETITOR BANK INTELLIGENCE & ING POSITIONING: Wallet share analysis. EXPLICITLY state ING's presence/absence.\n"
-    "5. PRODUCT SIGNALS & CROSS-SELL OPPORTUNITIES: Use Product Analyst data to prioritize by revenue potential.\n"
-    "6. CREDIT PROPOSAL & STRUCTURING: Working Capital Limit justified by WC Need. Cash/Non-Cash/Refinancing breakdown. Covenants.\n"
-    "7. PRODUCT RECOMMENDATIONS MATRIX: Table: client need → ING product → data evidence → estimated revenue impact.\n"
-    "8. CRITICAL ACTION PLAN: Prioritized next steps for ING RM.\n"
-    "- OVERRIDE: Liquidity crisis (QR<0.5), capital leakage (131>15%), or negative equity → 1st Priority = secure position.\n"
-    "- Otherwise: Concentration Risk high → 1st Priority = acquire dominant entities' Mizan."
+    "2. FINANCIAL HEALTH & CASH CYCLE ANALYSIS: Profitability, EBITDA, Cash Conversion Cycle, Cash Flow & Future Obligations, Transactional Costs.\n"
+    "3. COMPETITOR BANK INTELLIGENCE & ING POSITIONING: Wallet share analysis. EXPLICITLY state ING's presence/absence.\n"
+    "4. PRODUCT SIGNALS & CROSS-SELL OPPORTUNITIES: Use Product Analyst data to prioritize by revenue potential.\n"
+    "5. CREDIT PROPOSAL & STRUCTURING: Working Capital Limit justified by WC Need. Cash/Non-Cash/Refinancing breakdown. Covenants.\n"
+    "6. HIDDEN RISKS, CAPITAL LEAKAGE & CONCENTRATION: Insider Lending (131/331), Check Risk (103/102), Network concentration.\n"
+    "7. RISK ASSESSMENT & MITIGATION: Severity ratings with evidence from calculated ratios.\n"
+    "8. CRITICAL ACTION PLAN (Two-Tier):\n"
+    "   PRIMARY ACTIONS (Revenue-generating): Credit limit proposal, product cross-sell, refinancing targets, key client meetings.\n"
+    "   SECONDARY ACTIONS (Risk mitigation): Mizan acquisition of dominant network entities, covenant monitoring, insider lending remediation.\n"
+    "   OVERRIDE: Only if liquidity crisis (QR<0.5), capital leakage (131>15%), or negative equity → 1st Priority = secure position.\n"
 )
 PRODUCT_ANALYST_SYSTEM_PROMPT = (
     "You are a Senior Banking Product Analyst at **ING Bank Turkey** specializing in product signal extraction "
@@ -249,8 +253,12 @@ PRODUCT_ANALYST_SYSTEM_PROMPT = (
     "4. REVENUE ESTIMATION: Estimate approximate fee/interest income potential for ING from each product.\n\n"
 
     "CRITICAL RULES:\n"
+    "- DO NOT invent or guess sub-account codes. Only reference the EXACT accounts provided to you by the system.\n"
+    "- Follow the IF → THINKING → ACTION → PROPOSAL reasoning structure for EVERY product signal.\n"
+    "- Use the company's SECTOR information to prioritize relevant products.\n"
     "- Reference Tekdüzen account codes (e.g., '780.01-POS KOMİSYONU') for every signal.\n"
     "- Distinguish between BALANCE (stock at period-end) and VOLUME (flow during period).\n"
+    "- Use ALL 5 COLUMNS: credit, debit, balance_debit, balance_credit, and volume.\n"
     "- Annualize volumes if the data period is <12 months.\n"
     "- Sort recommendations by estimated ING revenue impact (highest first).\n"
     "- Map each signal to a specific ING Bank product offering.\n"
@@ -289,6 +297,529 @@ TRANSLATOR_SYSTEM_PROMPT = (
     "\n- Wallet Share → Cüzdan Payı"
 )
 
+import os
+import time
+import json
+import logging
+import requests
+import urllib3
+import inspect
+from typing import Optional,Any, Callable
+import re
+import requests
+
+
+# ── Token tracking ─────────────────────────────────────────────────
+_total_llm_calls = 0
+_total_input_tokens = 0
+_total_output_tokens = 0
+
+
+
+
+def _build_openai_tool_schema(func: Callable) -> dict[str, Any]:
+    """
+    Build a proper OpenAI-format tool schema from a callable.
+
+
+
+    Extracts parameter info from type hints and docstrings.
+    Includes 'required' and 'description' fields that vLLM needs.
+    """
+    sig = inspect.signature(func)
+    params: dict[str, Any] = {}
+    required: list[str] = []
+
+
+
+    # Parse descriptions from docstring Args section
+    param_descriptions: dict[str, str] = {}
+    doc = func.__doc__ or ""
+    in_args = False
+
+
+
+    for line in doc.split("\n"):
+        stripped = line.strip()
+
+
+
+        if stripped.lower().startswith("args:"):
+            in_args = True
+            continue
+
+
+
+        if in_args:
+            if stripped.lower().startswith("returns:") or stripped == "":
+                in_args = False
+                continue
+
+
+
+            # Parse "param_name: description" or "param_name (type): description"
+            arg_match = re.match(r"(\w+)(?:\s*\([^)]*\))?\s*:\s*(.+)", stripped)
+            if arg_match:
+                param_descriptions[arg_match.group(1)] = arg_match.group(2).strip()
+
+
+
+    for name, param in sig.parameters.items():
+        annotation = param.annotation
+
+
+
+        if annotation == int:
+            ptype = "integer"
+        elif annotation == float:
+            ptype = "number"
+        elif annotation == bool:
+            ptype = "boolean"
+        else:
+            ptype = "string"
+
+
+
+        prop: dict[str, Any] = {"type": ptype}
+        if name in param_descriptions:
+            prop["description"] = param_descriptions[name]
+
+
+
+        params[name] = prop
+
+
+
+        # If no default, it's required
+        if param.default is inspect.Parameter.empty:
+            required.append(name)
+
+
+
+    # Get first non-empty line of docstring as function description
+    func_desc = ""
+    if doc:
+        for line in doc.strip().split("\n"):
+            line = line.strip()
+            if line:
+                func_desc = line
+                break
+
+
+
+    schema: dict[str, Any] = {
+        "type": "function",
+        "function": {
+            "name": func.__name__,
+            "description": func_desc,
+            "parameters": {
+                "type": "object",
+                "properties": params,
+            },
+        },
+    }
+
+
+
+    if required:
+        schema["function"]["parameters"]["required"] = required
+
+
+
+    return schema
+
+
+
+
+
+def _extract_tool_call_from_text(
+    text: str,
+    tool_dispatch: dict[str, Callable],
+) -> dict[str, Any] | None:
+    """
+    Fallback: extract a JSON tool call from model text output.
+
+
+
+    The llama3 json parser expects {"name": "...", "parameters": {...}}.
+    Gemma 3 sometimes wraps this in markdown blocks, adds explanation text,
+    or uses tool_code blocks. This function tries to find and parse the
+    JSON regardless of wrapping.
+
+
+
+    Only returns a tool call if the parsed 'name' matches a known tool
+    in tool_dispatch, to avoid false positives on final text responses.
+
+
+
+    Returns:
+        Dict with 'name' and 'parameters' keys, or None if not found.
+    """
+    if not text or not text.strip():
+        return None
+
+
+
+    # Strategy 1: Find raw JSON objects with "name" and "parameters"
+    json_pattern = re.compile(
+        r'\{[^{}]*"name"\s*:\s*"[^"]+"\s*,\s*"parameters"\s*:\s*\{[^{}]*\}[^{}]*\}'
+        r"|"
+        r'\{[^{}]*"parameters"\s*:\s*\{[^{}]*\}\s*,\s*"name"\s*:\s*"[^"]+"[^{}]*\}'
+    )
+
+
+
+    for match in json_pattern.finditer(text):
+        try:
+            parsed = json.loads(match.group())
+            name = parsed.get("name")
+            params = parsed.get("parameters", {})
+            if name and name in tool_dispatch:
+                return {"name": name, "parameters": params}
+        except json.JSONDecodeError:
+            continue
+
+
+
+    # Strategy 2: Extract JSON from markdown code blocks
+    code_block_pattern = re.compile(r"```(?:json)?\s*\n(.*?)\n```", re.DOTALL)
+    for match in code_block_pattern.finditer(text):
+        block = match.group(1).strip()
+        try:
+            parsed = json.loads(block)
+            name = parsed.get("name")
+            params = parsed.get("parameters", {})
+            if name and name in tool_dispatch:
+                return {"name": name, "parameters": params}
+        except json.JSONDecodeError:
+            continue
+
+
+
+    return None
+
+
+
+
+
+def invoke_llm_with_tools(
+    system_prompt: str,
+    user_prompt: str,
+    tools: list[Callable],
+    temperature: float = 0.2,
+    max_tokens: int = 5000,
+    max_iterations: int = 10,
+    request_timeout: int = 120,
+    verify_ssl: bool = False,
+    logger=None,
+) -> str:
+    """
+    vLLM Tool Calling uyumlu otonom ReAct döngüsü.
+
+
+
+    Args:
+        system_prompt: System instruction.
+        user_prompt: Final user input.
+        tools: Callable tool list.
+        api_url: Chat completion endpoint.
+        temperature: Sampling temperature.
+        max_tokens: Max completion tokens.
+        max_iterations: Max ReAct loop count.
+        request_timeout: Read timeout.
+        verify_ssl: SSL verify flag.
+        logger: Optional logger.
+    """
+    tool_schemas = [_build_openai_tool_schema(t) for t in tools]
+    tool_map = {t.__name__: t for t in tools}
+
+
+
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+
+    headers = {"Content-Type": "application/json"}
+
+
+
+    for iteration in range(max_iterations):
+        payload = {
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "tools": tool_schemas,
+            "tool_choice": "auto",
+            "stream": True,
+        }
+
+
+
+        try:
+            start_time = time.monotonic()
+
+
+
+            response = requests.post(
+                API_URL,
+                headers=headers,
+                json=payload,
+                verify=verify_ssl,
+                timeout=(15, request_timeout),
+                stream=True,
+            )
+
+
+
+            try:
+                response.raise_for_status()
+            except requests.exceptions.HTTPError as e:
+                if logger:
+                    logger.error(f"[LLM+TOOLS] HTTP Error Details: {response.text}")
+                raise e
+
+
+
+            turn_text = ""
+            tool_calls_dict: dict[int, dict[str, Any]] = {}
+            has_exact_usage = False
+            input_tokens = 0
+            output_tokens = 0
+
+
+
+            for line in response.iter_lines():
+                if not line:
+                    continue
+
+
+
+                decoded = line.decode("utf-8")
+
+
+
+                if decoded.startswith("data: ") and decoded != "data: [DONE]":
+                    try:
+                        chunk = json.loads(decoded[6:])
+
+
+
+                        if "choices" in chunk and len(chunk["choices"]) > 0:
+                            delta = chunk["choices"][0].get("delta", {})
+
+
+
+                            if "content" in delta and delta["content"]:
+                                turn_text += delta["content"]
+
+
+
+                            if "tool_calls" in delta:
+                                for tc_delta in delta["tool_calls"]:
+                                    idx = tc_delta.get("index", 0)
+
+
+
+                                    if idx not in tool_calls_dict:
+                                        tool_calls_dict[idx] = {
+                                            "id": "",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "",
+                                                "arguments": "",
+                                            },
+                                        }
+
+
+
+                                    if "id" in tc_delta and tc_delta["id"]:
+                                        tool_calls_dict[idx]["id"] = tc_delta["id"]
+
+
+
+                                    if "type" in tc_delta and tc_delta["type"]:
+                                        tool_calls_dict[idx]["type"] = tc_delta["type"]
+
+
+
+                                    if "function" in tc_delta:
+                                        func_delta = tc_delta["function"]
+
+
+
+                                        if "name" in func_delta and func_delta["name"]:
+                                            tool_calls_dict[idx]["function"]["name"] += func_delta["name"]
+
+
+
+                                        if "arguments" in func_delta and func_delta["arguments"]:
+                                            tool_calls_dict[idx]["function"]["arguments"] += func_delta["arguments"]
+
+
+
+                        if "usage" in chunk and chunk["usage"] is not None:
+                            input_tokens = chunk["usage"].get("prompt_tokens", 0)
+                            output_tokens = chunk["usage"].get("completion_tokens", 0)
+                            has_exact_usage = True
+
+
+
+                    except json.JSONDecodeError:
+                        continue
+
+
+
+            elapsed_ms = round((time.monotonic() - start_time) * 1000, 2)
+
+
+
+            if not has_exact_usage:
+                input_tokens = int(len(str(messages).split()) * 1.3)
+                output_tokens = int(
+                    (len(turn_text.split()) + len(str(tool_calls_dict).split())) * 1.3
+                )
+
+
+
+            # Native tool call yoksa, text içinden fallback dene
+            if not tool_calls_dict:
+                fallback_tool_call = _extract_tool_call_from_text(turn_text, tool_map)
+
+
+
+                if fallback_tool_call:
+                    tool_calls_dict[0] = {
+                        "id": f"fallback_call_{int(time.time())}",
+                        "type": "function",
+                        "function": {
+                            "name": fallback_tool_call["name"],
+                            "arguments": json.dumps(
+                                fallback_tool_call["parameters"],
+                                ensure_ascii=False,
+                            ),
+                        },
+                    }
+
+
+
+            # TOOL YOK → final response
+            if not tool_calls_dict:
+                if logger:
+                    logger.info(
+                        f"[LLM+TOOLS] ✅ Final Response | Iteration {iteration+1} | "
+                        f"{elapsed_ms} ms | in={input_tokens} out={output_tokens}"
+                    )
+                return turn_text
+
+
+
+            if logger:
+                logger.info(
+                    f"[LLM+TOOLS] ⚙️ Tool Call(s) Detected | Iteration {iteration+1} | "
+                    f"{elapsed_ms} ms | in={input_tokens} out={output_tokens}"
+                )
+
+
+
+            formatted_tool_calls = []
+            for idx, tc in tool_calls_dict.items():
+                call_id = tc["id"] if tc["id"] else f"call_{idx}_{int(time.time())}"
+                formatted_tool_calls.append(
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": tc["function"]["name"],
+                            "arguments": tc["function"]["arguments"],
+                        },
+                    }
+                )
+
+
+
+            # Assistant mesajını güvenli hale getir
+            assistant_msg: dict[str, Any] = {
+                "role": "assistant",
+                "tool_calls": formatted_tool_calls,
+            }
+
+
+
+            if turn_text:
+                assistant_msg["content"] = turn_text
+
+
+
+            messages.append(assistant_msg)
+
+
+
+            # Tool execution
+            for tc in formatted_tool_calls:
+                func_name = tc["function"]["name"]
+                tool_call_id = tc["id"]
+
+
+
+                try:
+                    kwargs = json.loads(tc["function"]["arguments"])
+                    if logger:
+                        logger.info(f" -> Executing: {func_name}({kwargs})")
+
+
+
+                    if func_name in tool_map:
+                        func = tool_map[func_name]
+                        result = func(**kwargs)
+                        result_str = str(result)
+                    else:
+                        result_str = f"Error: Tool '{func_name}' is not registered."
+
+
+
+                except json.JSONDecodeError:
+                    result_str = (
+                        "Error: Failed to parse tool arguments. "
+                        f"LLM generated invalid JSON: {tc['function']['arguments']}"
+                    )
+                    if logger:
+                        logger.error(result_str)
+
+
+
+                except Exception as e:
+                    result_str = f"Error executing tool: {e}"
+                    if logger:
+                        logger.error(result_str)
+
+
+
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "name": func_name,
+                        "content": result_str,
+                    }
+                )
+
+
+
+        except Exception as e:
+            if logger:
+                logger.error(f"[LLM+TOOLS] ❌ Loop crashed: {e}")
+            return f"Autonomous loop failed: {e}"
+
+
+
+    if logger:
+        logger.warning(f"[LLM+TOOLS] ⚠️ Max iterations ({max_iterations}) reached.")
+    return "Analysis terminated: Reached maximum iteration limit."
+ 
 #----Version1------
 # QUANT_ANALYST_SYSTEM_PROMPT = (
 #     "You are a Senior Quantitative Financial Analyst specializing in Turkish "

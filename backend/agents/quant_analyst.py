@@ -1,12 +1,18 @@
 """
 Agent 2: Quantitative Analyst — Local calc + LLM interpretation (Banking Enhanced)
 
+
+
 DYNAMIC MAPPING: Account code descriptions are extracted dynamically
 from each Mizan document — no hardcoded dictionaries.
+
+
 
 PREFIX-BASED AGGREGATION: Uses str.startswith() for clean aggregation
 across account code hierarchies (e.g., "12" captures 120, 121, etc.).
 """
+
+
 
 import re
 import logging
@@ -15,7 +21,11 @@ from collections import defaultdict
 from agents.base import BaseAgent
 from llm_config import invoke_llm, QUANT_ANALYST_SYSTEM_PROMPT
 
+
+
 logger = logging.getLogger("swarm.agents.quant_analyst")
+
+
 
 mizan_mapping= {
     # --- 1. DÖNEN VARLIKLAR ---
@@ -66,6 +76,8 @@ mizan_mapping= {
     197: "Sayım ve Tesellüm Noksanları",
     198: "Diğer Çeşitli Dönen Varlıklar",
     199: "Diğer Dönen Varlıklar Karşılığı (-)",
+
+
 
     # --- 2. DURAN VARLIKLAR ---
     220: "Alıcılar",
@@ -124,6 +136,8 @@ mizan_mapping= {
     298: "Stok Değer Düşüklüğü Karşılığı (-)",
     299: "Birikmiş Amortismanlar (-)",
 
+
+
     # --- 3. KISA VADELİ YABANCI KAYNAKLAR ---
     300: "Banka Kredileri",
     301: "Finansal Kiralama İşlemlerinden Borçlar",
@@ -166,6 +180,8 @@ mizan_mapping= {
     397: "Sayım ve Tesellüm Fazlaları",
     399: "Diğer Çeşitli Yabancı Kaynaklar",
 
+
+
     # --- 4. UZUN VADELİ YABANCI KAYNAKLAR ---
     400: "Banka Kredileri",
     401: "Finansal Kiralama İşlemlerinden Borçlar",
@@ -194,6 +210,8 @@ mizan_mapping= {
     493: "Tesise Katılma Payları",
     499: "Diğer Çeşitli Uzun Vadeli Yabancı Kaynaklar",
 
+
+
     # --- 5. ÖZ KAYNAKLAR ---
     500: "Sermaye",
     501: "Ödenmemiş Sermaye (-)",
@@ -215,6 +233,8 @@ mizan_mapping= {
     580: "Geçmiş Yıllar Zararları (-)",
     590: "Dönem Net Karı",
     591: "Dönem Net Zararı (-)",
+
+
 
     # --- 6. GELİR TABLOSU HESAPLARI ---
     600: "Yurtiçi Satışlar",
@@ -260,6 +280,8 @@ mizan_mapping= {
     697: "Yıllara Yaygın İnşaat Enflasyon Düzeltme Farkları",
     698: "Enflasyon Düzeltme Hesabı",
 
+
+
     # --- 7. MALİYET HESAPLARI (7/A SEÇENEĞİ) ---
     710: "Direkt İlk Madde ve Malzeme Giderleri",
     711: "Direkt İlk Madde ve Malzeme Giderleri Yansıtma Hesabı",
@@ -290,6 +312,8 @@ mizan_mapping= {
     781: "Finansman Giderleri Yansıtma Hesabı",
     782: "Finansman Giderleri Fark Hesabı",
 
+
+
     # --- 7. MALİYET HESAPLARI (7/B SEÇENEĞİ) ---
     790: "İlk Madde ve Malzeme Giderleri",
     791: "İşçi Ücret ve Giderleri",
@@ -302,10 +326,15 @@ mizan_mapping= {
     798: "Gider Çeşitleri Yansıtma Hesabı",
     799: "Üretim Maliyet Hesabı",
 
+
+
     # --- 9. NAZIM HESAPLAR ---
     900: "Nazım Hesaplar (Teminatlar, Matrah Artırımları vb.)",
     901: "Nazım Hesaplar Karşılığı"
 }
+
+
+
 
 
 class QuantAnalystAgent(BaseAgent):
@@ -314,6 +343,8 @@ class QuantAnalystAgent(BaseAgent):
     required_inputs = ["standardized_mizan"]
     output_keys = ["financial_ratios"]
 
+
+
     def execute(self, state: dict) -> dict:
         retry_count = state.get("retry_count", 0)
         period_months = 12
@@ -321,11 +352,17 @@ class QuantAnalystAgent(BaseAgent):
         raw_donem = "Unknown"
         donem_label = "Annual (12M) - Default"
 
+
+
         standardized = state.get("standardized_mizan", [])
         if not standardized:
             return {"financial_ratios": {"error": "No standardized mizan data"}, "retry_count": retry_count + 1}
 
+
+
         df = pd.DataFrame(standardized)
+
+
 
         # ── Data-Driven Period Extraction ──
         donem_col = "donem" if "donem" in df.columns else "period" if "period" in df.columns else None
@@ -347,105 +384,163 @@ class QuantAnalystAgent(BaseAgent):
         else:
             logger.warning("⚠️ 'donem' column not found in data. Falling back to 12M.")
 
+
+
         # Hesap kodlarının string olduğundan emin olalım
         df["account_code"] = df["account_code"].astype(str)
 
-        # ── YARDIMCI FONKSİYONLAR ──
+
+
+                # ── YARDIMCI FONKSİYONLAR ──
         def bal_debit(code: str) -> float:
             """Net balance for debit-normal accounts (Assets, Expenses).
             Exact match first, then prefix aggregation."""
             m = df[df["account_code"] == code]
             if not m.empty:
                 return float(m.iloc[0]["debit"] - m.iloc[0]["credit"])
-            m = df[df["account_code"].str.startswith(code)]
+            #m = df[df["account_code"].str.startswith(code)]
             if not m.empty:
                 return float(m["debit"].sum() - m["credit"].sum())
             return 0.0
-
+        
         def bal_credit(code: str) -> float:
             """Net balance for credit-normal accounts (Liabilities, Revenue)."""
             return -bal_debit(code)
-
+        
+        
+        def main_accounts_w_prefix(df: pd.DataFrame, prefix: str = None):
+            df["account_code"] = df["account_code"].astype(str).str.strip()
+            main_accounts_df = df[~df["account_code"].str.contains(".", regex=False, na=False)]
+            if prefix:
+                main_accounts_df = main_accounts_df[main_accounts_df["account_code"].str.startswith(prefix)]
+            return main_accounts_df
         # ══════════════════════════════════════════════════════════════
         # 1. GELİR TABLOSU (Income Statement)
         # ══════════════════════════════════════════════════════════════
         gross_revenue = bal_credit("600") + bal_credit("601") + bal_credit("602")
         sales_deductions = bal_debit("610") + bal_debit("611") + bal_debit("612")
         net_revenue = gross_revenue - sales_deductions
-        cogs = bal_debit("62")
+        cogs = bal_debit("620") + bal_debit("621") + bal_debit("622") + bal_debit("623") 
         gross_profit = net_revenue - cogs
         gross_margin = (gross_profit / net_revenue * 100) if net_revenue else 0
-
-        op_expenses = bal_debit("63")
+        
+        op_expenses = bal_debit("630") + bal_debit("631") +bal_debit("632")
         operating_profit = gross_profit - op_expenses
         operating_margin = (operating_profit / net_revenue * 100) if net_revenue else 0
-
+        
         # EBITDA Proxy (Operating Profit + Depreciation/Amortization add-back)
         depreciation_257 = bal_credit("257")
         amortization_268 = bal_credit("268")
         ebitda_proxy = operating_profit + depreciation_257 + amortization_268
-
+        
         # ══════════════════════════════════════════════════════════════
         # 2. BİLANÇO & LİKİDİTE (Balance Sheet & Liquidity)
         # ══════════════════════════════════════════════════════════════
-        ca_df = df[df["account_code"].str.startswith("1")]
-        current_assets = float(ca_df["debit"].sum() - ca_df["credit"].sum())
-
-        nca_df = df[df["account_code"].str.startswith("2")]
-        non_current_assets = float(nca_df["debit"].sum() - nca_df["credit"].sum())
-        total_assets = current_assets + non_current_assets
-
-        stl_df = df[df["account_code"].str.startswith("3")]
-        short_term_liab = float(stl_df["credit"].sum() - stl_df["debit"].sum())
-
-        current_ratio = (current_assets / short_term_liab) if short_term_liab else 0
-        inventory = bal_debit("15")
-        quick_ratio = ((current_assets - inventory) / short_term_liab) if short_term_liab else 0
-
+        EKSI_HESAPLAR = [
+        "103", "119", "122", "124", "129", "137", "139", "199",
+        "222", "224", "229", "237", "239", "241", "243", "244", "245", "247", "249", "257", "268", "278", "289", "298", "299",
+        "302", "308", "322", "371", "381",
+        "402", "408", "422",
+        "501", "580", "591",
+        "610", "611", "612", "620", "621", "622", "623"
+        ]
+        def eksi_hesap_main_sum(df: pd.DataFrame, prefix: str = None):
+            df["account_code"] = df["account_code"].astype(str).str.strip()
+            condition_no_dot = ~df["account_code"].str.contains(".", regex=False, na=False)
+            condition_length_3 = df["account_code"].str.len() == 3
+            main_accounts_df = df[condition_no_dot & condition_length_3].copy()
+            main_accounts_df["is_contra"] = main_accounts_df["account_code"].isin(EKSI_HESAPLAR)
+            if prefix:
+                main_accounts_df = main_accounts_df[main_accounts_df["account_code"].str.startswith(prefix)]
+            toplam_borc = main_accounts_df["debit"].sum()
+            toplam_alacak = main_accounts_df["credit"].sum()
+            net_bakiye = 0.0
+            if prefix:
+                ilk_hane = prefix[0]
+                if ilk_hane in ["1", "2"]: # Aktif Karakterli
+                    net_bakiye = toplam_borc - toplam_alacak
+                elif ilk_hane in ["3", "4", "5"]: # Pasif Karakterli (Sermaye, Borçlar vb.)
+                    net_bakiye = toplam_alacak - toplam_borc
+                elif ilk_hane == "6": # Gelir Tablosu (Satışlar Alacak, Giderler Borç kalanı verir)
+                    net_bakiye = toplam_alacak - toplam_borc
+                else:
+                    net_bakiye = toplam_borc - toplam_alacak
+            else:
+                # Prefix yoksa tüm mizanı topluyordur.
+                net_bakiye = toplam_borc - toplam_alacak
+            return float(toplam_borc), float(toplam_alacak), float(net_bakiye)
+        
+        
+        current_assets_debit, current_assets_credit, current_assets_net= eksi_hesap_main_sum(df, prefix="1")
+        
+        non_current_assets_debit, non_current_assets_credit, non_current_assets_net= eksi_hesap_main_sum(df, prefix="2")
+        
+        total_assets = current_assets_net + non_current_assets_net
+        
+        short_term_liab_debit, short_term_liab_credit, short_term_liab_net= eksi_hesap_main_sum(df, prefix="3")
+        
+        current_ratio = (current_assets_net / short_term_liab_net) if short_term_liab_net else 0
+        inventory = bal_debit("150") + bal_debit("151") + bal_debit("152") + bal_debit("153") +bal_debit("154") + bal_debit("155") + bal_debit("156") + bal_debit("157") + bal_debit("158") + bal_debit("159")
+        quick_ratio = ((current_assets_net - inventory) / short_term_liab_net) if short_term_liab_net else 0
+        
         # Cash & liquid instruments
         cash_100 = bal_debit("100")
         received_checks_101 = bal_debit("101")
         banks_102_total = bal_debit("102")
-        given_checks_103 = bal_debit("103")
-
+        given_checks_103 = bal_credit("103")
+        
         # ══════════════════════════════════════════════════════════════
         # 3. BORÇLULUK (Leverage & Debt)
         # ══════════════════════════════════════════════════════════════
-        ltl_df = df[df["account_code"].str.startswith("4")]
-        long_term_liab = float(ltl_df["credit"].sum() - ltl_df["debit"].sum())
-        total_liab = short_term_liab + long_term_liab
-
-        eq_df = df[df["account_code"].str.startswith("5")]
-        total_equity = float(eq_df["credit"].sum() - eq_df["debit"].sum())
-        debt_to_equity = (total_liab / total_equity) if total_equity else 0
-
+        
+        long_term_liab_debit, long_term_liab_credit, long_term_liab_net = eksi_hesap_main_sum(df, prefix="4")
+        total_liab = short_term_liab_net + long_term_liab_net
+        
+        
+        total_equity_debit, total_equity_credit, total_equity_net = eksi_hesap_main_sum(df, prefix="5")
+        debt_to_equity = (total_liab / total_equity_net) if total_equity_net else 0
+        
         total_bank_loans = bal_credit("300") + bal_credit("400") + bal_credit("309")
         bank_debt_ratio = (total_bank_loans / total_liab * 100) if total_liab else 0
-
+        
         fin_exp_780 = bal_debit("780")
         fin_expense_ratio = (fin_exp_780 / net_revenue * 100) if net_revenue else 0
-        pos_780_01 = bal_debit("780.01")
-
+        #pos_780_01 = bal_debit("780.01")
+        
         # ══════════════════════════════════════════════════════════════
         # 4. ÇALIŞMA SERMAYESİ VE İLİŞKİLİ TARAF (Working Capital & Related Party)
         # ══════════════════════════════════════════════════════════════
-        trade_receivables = bal_debit("12")
+        trade_receivables = bal_debit("120") + bal_debit("121") + bal_credit("122") + bal_credit("124") + bal_debit("126") + bal_debit("127") + bal_debit("128") + bal_credit("129")
         collection_period = (trade_receivables / net_revenue * period_days) if net_revenue else 0
-
-        trade_payables = bal_credit("32")
+        
+        trade_payables = bal_debit("320") + bal_debit("321") + bal_credit("322") + bal_debit("326") + bal_debit("329")
         payment_period = (trade_payables / cogs * period_days) if cogs else 0
-
+        
         inventory_period = (inventory / cogs * period_days) if cogs else 0
         cash_conversion_cycle = collection_period + inventory_period - payment_period
-
+        
         insider_lending_131 = bal_debit("131")
         insider_borrowing_331 = bal_credit("331")
         insider_lending_ratio = (insider_lending_131 / total_assets * 100) if total_assets else 0
-
+        
         check_risk_ratio = (given_checks_103 / banks_102_total) if banks_102_total else 0
-
         # ══════════════════════════════════════════════════════════════
-        # 5. RAKİP BANKA ANALİZİ (Competitor Bank Analysis)
+        # 5. GRAND TOTAL NAKİT AKIŞI (Cash Flow & Future Projections)
+        # ══════════════════════════════════════════════════════════════
+        # Dönem İçi Hacim (Flow): 100, 102 ve 108 hesaplarındaki brüt borç/alacak toplamları
+        liquid_df = pd.concat([main_accounts_w_prefix(df, prefix="100"),main_accounts_w_prefix(df, prefix="102"), main_accounts_w_prefix(df, prefix="108")])
+        period_cash_inflow = float(liquid_df["debit"].sum())
+        period_cash_outflow = float(liquid_df["credit"].sum())
+        period_net_cash_movement = period_cash_inflow - period_cash_outflow
+        
+        # Gelecekteki Stok (Stock): Kapanış bakiyeleri üzerinden projeksiyon# Gelecek Giriş = Ticari Alacaklar + Alınan Çekler (Bekleyen Tahsilatlar)
+        future_cash_inflow = trade_receivables + received_checks_101
+        # Gelecek Çıkış = Tüm Borçlar (3xx + 4xx) + Verilen Çekler (103 - Eksi karakterli aktif)# short_term_liab ve long_term_liab halihazırda 3xx ve 4xx'in net bakiyesidir.
+        future_cash_outflow = total_liab + given_checks_103
+        future_net_position = future_cash_inflow - future_cash_outflow
+        
+        # ══════════════════════════════════════════════════════════════
+        # 6. RAKİP BANKA ANALİZİ (Competitor Bank Analysis)
         # ══════════════════════════════════════════════════════════════
         def get_bank_breakdown(parent_code: str) -> list:
             """Extract sub-account balances to identify competitor bank shares.
@@ -453,17 +548,17 @@ class QuantAnalystAgent(BaseAgent):
             categories = {}
             parent_row = df[df["account_code"] == parent_code]
             parent_name = str(parent_row.iloc[0]["account_name"]).strip().upper() if not parent_row.empty else ""
-
+        
             for _, row in df.iterrows():
                 code = str(row["account_code"]).strip()
                 name = str(row.get("account_name", code)).strip()
                 raw_net = float(row["debit"]) - float(row["credit"])
                 if raw_net == 0 or code == parent_code or not code.startswith(parent_code):
                     continue
-
+        
                 match = re.search(r'^(' + re.escape(parent_code) + r'[\.\s\-]+[A-Za-z0-9]+)', code)
                 l1_code = match.group(1) if match else code
-
+        
                 if l1_code not in categories:
                     categories[l1_code] = {"name": l1_code, "raw_balance": 0.0, "children": [], "is_explicit": False}
                 if code == l1_code:
@@ -480,7 +575,7 @@ class QuantAnalystAgent(BaseAgent):
                     })
                     if not categories[l1_code]["is_explicit"]:
                         categories[l1_code]["raw_balance"] += raw_net
-
+        
             # Flatten dummy categories
             flat_categories = []
             for l1_code, cat in categories.items():
@@ -490,7 +585,7 @@ class QuantAnalystAgent(BaseAgent):
                     is_dummy = True
                 elif cat_name_upper == l1_code.upper():
                     is_dummy = True
-
+        
                 if is_dummy:
                     for child in cat["children"]:
                         if parent_name and child["name"].strip().upper() == parent_name:
@@ -509,7 +604,7 @@ class QuantAnalystAgent(BaseAgent):
                         filtered_children.append(child)
                     cat["children"] = filtered_children
                     flat_categories.append(cat)
-
+        
             total_abs_parent = sum(abs(cat["raw_balance"]) for cat in flat_categories)
             result = []
             for cat in flat_categories:
@@ -539,30 +634,37 @@ class QuantAnalystAgent(BaseAgent):
                 })
             result.sort(key=lambda x: x["balance"], reverse=True)
             return result
-
+        
         banks_102 = get_bank_breakdown("102")
         banks_300 = get_bank_breakdown("300")
         banks_400 = get_bank_breakdown("400")
-
-        def fmt_bank_shares(data: list) -> str:
-            """Format bank breakdown data as a string for LLM prompt injection."""
+        
+        def fmt_bank_shares(parent_code: str, parent_name: str, data: list) -> str:
+            """Format bank breakdown data explicitly for LLM comprehension with parent hierarchy."""
             if not data:
-                return "No detailed sub-account data available."
+                return f"No detailed sub-account data available for {parent_code} - {parent_name}."
+            # Ana hesabın (Parent) toplam bakiyesini hesapla
+            parent_total = sum(cat.get("balance", 0) for cat in data)
             lines = []
+            # En üste Ana Hesap (Parent Account) bilgisini ekliyoruz
+            lines.append(f"Main account: {parent_code} - {parent_name} (Total Analyzed Balance: ₺{parent_total:,.0f})")
             for category in data:
                 cat_name = category.get("category_name", "Unknown")
                 cat_balance = category.get("balance", 0)
                 cat_pct = category.get("share_of_total_pct", 0)
-                lines.append(f"**{cat_name}** (₺{cat_balance:,.0f} - %{cat_pct:.1f})")
+                lines.append(f"🔹 CATEGORY: {cat_name}")
+                lines.append(f"   Category Total Balance: ₺{cat_balance:,.0f} (This category represents {cat_pct:.1f}% of the entire {parent_code} account)")
                 sub_accounts = category.get("sub_accounts", [])
                 top_3_subs = sorted(sub_accounts, key=lambda x: x.get("balance", 0), reverse=True)[:3]
                 for sub in top_3_subs:
                     sub_name = sub.get("name", "Unknown")
                     sub_balance = sub.get("balance", 0)
                     sub_pct = sub.get("share_of_parent_pct", 0)
-                    lines.append(f"  - {sub_name}: ₺{sub_balance:,.0f} (%{sub_pct:.1f})")
+                    # Alt hesap - Kategori ilişkisi
+                    lines.append(f"     ↳ Bank/Sub-account: {sub_name} | Balance: ₺{sub_balance:,.0f} | Share: {sub_pct:.1f}% of {cat_name}")
+                lines.append("")
             return "\n".join(lines)
-
+        
         # ══════════════════════════════════════════════════════════════
         # 6. RATIOS DICTIONARY
         # ══════════════════════════════════════════════════════════════
@@ -595,8 +697,8 @@ class QuantAnalystAgent(BaseAgent):
                 "formula": "Current Assets [1xx] / Short-Term Liabilities [3xx]",
                 "accounts_used": ["100", "102", "120", "300", "320"],
                 "raw_values": {
-                    "current_assets": current_assets,
-                    "short_term_liabilities": short_term_liab,
+                    "current_assets": current_assets_net,
+                    "short_term_liabilities": short_term_liab_net,
                 }
             },
             "quick_ratio": {
@@ -604,9 +706,9 @@ class QuantAnalystAgent(BaseAgent):
                 "formula": "(Current Assets[1xx] - Inventory[15x]) / Short-Term Liabilities[3xx]",
                 "accounts_used": ["100", "102", "120", "150", "151", "152", "153", "300", "309", "320"],
                 "raw_values": {
-                    "liquid_assets": current_assets - inventory,
+                    "liquid_assets": current_assets_net - inventory,
                     "inventory_total": inventory,
-                    "short_term_liabilities": short_term_liab,
+                    "short_term_liabilities": short_term_liab_net,
                 }
             },
             "collection_period": {
@@ -655,10 +757,10 @@ class QuantAnalystAgent(BaseAgent):
                 "formula": "(Short-Term Liab + Long-Term Liab) / Equity",
                 "accounts_used": ["300", "320", "400", "500", "570", "590"],
                 "raw_values": {
-                    "short_term_liab": short_term_liab,
-                    "long_term_liab": long_term_liab,
+                    "short_term_liab": short_term_liab_net,
+                    "long_term_liab": long_term_liab_net,
                     "total_liabilities": total_liab,
-                    "total_equity": total_equity,
+                    "total_equity": total_equity_net,
                 }
             },
             "bank_debt_ratio": {
@@ -682,15 +784,15 @@ class QuantAnalystAgent(BaseAgent):
                     "net_revenue": net_revenue,
                 }
             },
-            "pos_commission_ratio": {
-                "value": round((pos_780_01 / net_revenue * 100) if net_revenue else 0, 2), "unit": "%",
-                "formula": "POS Commission [780.01] / Net Revenue × 100",
-                "accounts_used": ["780.01"],
-                "raw_values": {
-                    "pos_komisyon_780_01": pos_780_01,
-                    "net_revenue": net_revenue,
-                }
-            },
+            #"pos_commission_ratio": {
+            #    "value": round((pos_780_01 / net_revenue * 100) if net_revenue else 0, 2), "unit": "%",
+            #    "formula": "POS Commission [780.01] / Net Revenue × 100",
+            #    "accounts_used": ["780.01"],
+            #    "raw_values": {
+            #        "pos_komisyon_780_01": pos_780_01,
+            #        "net_revenue": net_revenue,
+            #    }
+            #},
             "insider_lending_ratio": {
                 "value": round(insider_lending_ratio, 2), "unit": "%",
                 "formula": "(131 / Equity) * 100",
@@ -698,8 +800,8 @@ class QuantAnalystAgent(BaseAgent):
                 "raw_values": {
                     "insider_lending_131": insider_lending_131,
                     "insider_borrowing_331": insider_borrowing_331,
-                    "current_assets": current_assets,
-                    "non_current_assets": non_current_assets,
+                    "current_assets": current_assets_net,
+                    "non_current_assets": non_current_assets_net,
                     "total_assets": total_assets,
                 }
             },
@@ -712,6 +814,14 @@ class QuantAnalystAgent(BaseAgent):
                     "banks_102_total": banks_102_total,
                 }
             },
+            "cash_flow_summary": {
+                "period_cash_inflow": period_cash_inflow,
+                "period_cash_outflow": period_cash_outflow,
+                "period_net_movement": period_net_cash_movement,
+                "future_cash_inflow": future_cash_inflow,
+                "future_cash_outflow": future_cash_outflow,
+                "future_net_position": future_net_position
+                            },
             "competitor_banks": {
                 "102": banks_102,
                 "300": banks_300,
@@ -724,11 +834,10 @@ class QuantAnalystAgent(BaseAgent):
                 "label": donem_label,
             },
         }
-
         for n, d in ratios.items():
             if isinstance(d, dict) and "value" in d:
                 logger.info(f"  - {n}: {d['value']}{d['unit']}")
-
+        
         # ── LLM INTERPRETATION ──
         llm_text = ""
         try:
@@ -738,79 +847,94 @@ class QuantAnalystAgent(BaseAgent):
                     acc_str = str(acc)
                     code = acc_str.split('.')[0] if '.' in acc_str else acc_str
                     if code.isdigit() and int(code) in mizan_mapping:
-                        mapped.append(f"{acc_str}-{mizan_mapping[int(code)]}")
+                        mapped.append(f"{acc_str} - {mizan_mapping[int(code)]}")
                     else:
                         mapped.append(acc_str)
                 return mapped
-
+        
             summary = "\n".join(
-                f"- {n}: {d['value']}{d['unit']} (accounts: {', '.join(map_accounts(d['accounts_used']))})"
+                f"- {n}: {d['value']}{d['unit']} (Accounts Used: {', '.join(map_accounts(d['accounts_used']))})"
                 for n, d in ratios.items() if isinstance(d, dict) and "value" in d
             )
-
+        
             prompt = (
                 f"⏱️ DATA PERIOD: {donem_label} ({period_days} days). "
-                f"Analyze these financial ratios for {state.get('company_name', 'Company')}:\n\n"
-                f"{summary}\n\n"
-
-                f"### 1. Income Statement:\n"
-                f"- **Gross Revenue (600+601+602):** ₺{gross_revenue:,.0f}\n"
-                f"- **Sales Deductions (610+611+612):** ₺{sales_deductions:,.0f}\n"
+                f"Company: **{state.get('company_name', 'Company')}**\n\n"
+                f"## RATIO SUMMARY:\n{summary}\n\n"
+        
+                f"## 1. INCOME STATEMENT:\n"
+                f"- Gross Revenue (600+601+602): ₺{gross_revenue:,.0f}\n"
+                f"- Sales Deductions (610+611+612): ₺{sales_deductions:,.0f}\n"
                 f"- **Net Revenue:** ₺{net_revenue:,.0f}\n"
-                f"- **COGS (62x):** ₺{cogs:,.0f} | **Gross Profit:** ₺{gross_profit:,.0f}\n"
-                f"- **Operating Expenses (63x):** ₺{op_expenses:,.0f} | **Operating Profit:** ₺{operating_profit:,.0f}\n"
-                f"- **EBITDA Proxy (Operating Profit + 257 + 268):** ₺{ebitda_proxy:,.0f}\n\n"
-
-                f"### 2. Balance Sheet:\n"
-                f"- **Current Assets (1xx):** ₺{current_assets:,.0f} | **Non-Current Assets (2xx):** ₺{non_current_assets:,.0f}\n"
-                f"- **Total Assets:** ₺{total_assets:,.0f}\n"
-                f"- **Cash (100):** ₺{cash_100:,.0f} | **Received Checks (101):** ₺{received_checks_101:,.0f}\n"
-                f"- **Bank Deposits (102):** ₺{banks_102_total:,.0f} | **Given Checks (103):** ₺{given_checks_103:,.0f}\n"
-                f"- **Inventory (15x):** ₺{inventory:,.0f}\n"
-                f"- **Short-Term Liabilities (3xx):** ₺{short_term_liab:,.0f}\n\n"
-
-                f"### 3. Leverage:\n"
-                f"- **Long-Term Liabilities (4xx):** ₺{long_term_liab:,.0f}\n"
-                f"- **Total Liabilities:** ₺{total_liab:,.0f} | **Total Equity (5xx):** ₺{total_equity:,.0f}\n"
-                f"- **Total Bank Loans (300+400+309):** ₺{total_bank_loans:,.0f}\n"
-                f"- **Fin. Expenses (780):** ₺{fin_exp_780:,.0f} | **POS Comm (780.01):** ₺{pos_780_01:,.0f}\n\n"
-
-                f"### 4. Working Capital:\n"
-                f"- **Trade Receivables (12x):** ₺{trade_receivables:,.0f} | Collection Period: {collection_period:.0f} days\n"
-                f"- **Trade Payables (32x):** ₺{trade_payables:,.0f} | Payment Period: {payment_period:.0f} days\n"
-                f"- **Inventory Period:** {inventory_period:.0f} days\n"
-                f"- **Cash Conversion Cycle:** {cash_conversion_cycle:.0f} days\n"
-                f"- **Due from Shareholders (131):** ₺{insider_lending_131:,.0f} | **Due to Shareholders (331):** ₺{insider_borrowing_331:,.0f}\n\n"
-
-                f"### 5. COMPETITOR BANK DISTRIBUTION:\n"
-                f"**102-BANKALAR (Deposits):**\n{fmt_bank_shares(banks_102)}\n\n"
-                f"**300-BANKA KREDİLERİ KV (ST Loans):**\n{fmt_bank_shares(banks_300)}\n\n"
-                f"**400-BANKA KREDİLERİ UV (LT Loans):**\n{fmt_bank_shares(banks_400)}\n\n"
-
-                f"### BANKING INTELLIGENCE GUIDELINES:\n"
-                f"- CASH TRAPPING: Check Account 131 (Due from Shareholders). If >5% of Total Assets, flag as 'Capital Leakage/Risk'.\n"
-                f"- DUALITY CHECK: Compare Account 103 (Given Checks) against 102 (Bank Deposits). If 103 > 102, highlight urgent liquidity risk.\n"
-                f"- WINDOW DRESSING: Observe the difference between period movement and closing balance for key liquid assets.\n"
-                f"- CASH CONVERSION: Analyze the Cash Conversion Cycle ({cash_conversion_cycle:.0f} days). If high, propose working capital financing.\n"
-                f"- CROSS-SELL: Look at competitor banks. If Bank A has the majority of 300 (Loans) but we have 102 (Deposits), suggest loan buyout.\n"
-                f"- TAX AVOIDANCE SIGNS: If Operating Profit is high but Net Profit is surprisingly low, investigate non-operating expenses.\n\n"
-
-                f"Structure your analysis into these four exact pillars:\n"
-                f"1. PROFITABILITY & EBITDA DYNAMICS\n"
-                f"2. LIQUIDITY & WORKING CAPITAL (Focus on Cash Cycle & Check Risk)\n"
-                f"3. LEVERAGE, DEPENDENCY & INSIDER LENDING\n"
-                f"4. TRANSACTIONAL COST & CROSS-SELL STRATEGY\n"
+                f"- COGS (62x): ₺{cogs:,.0f} | **Gross Profit:** ₺{gross_profit:,.0f} | Gross Margin: {round(gross_margin, 2)}%\n"
+                f"- Operating Expenses (63x): ₺{op_expenses:,.0f} | **Operating Profit:** ₺{operating_profit:,.0f} | Operating Margin: {round(operating_margin, 2)}%\n"
+                f"- **EBITDA Proxy** (OpProfit + Depreciation 257 + Amortization 268): ₺{ebitda_proxy:,.0f}\n"
+                f"→ **Assessment:** Provide 1-2 sentence profitability insight.\n\n"
+        
+                f"## 2. BALANCE SHEET & LIQUIDITY:\n"
+                f"- Current Assets (1xx): ₺{current_assets_net:,.0f} | Non-Current (2xx): ₺{non_current_assets_net:,.0f} | **Total Assets:** ₺{total_assets:,.0f}\n"
+                f"- Cash (100): ₺{cash_100:,.0f} | Checks (101): ₺{received_checks_101:,.0f} | Banks (102): ₺{banks_102_total:,.0f} | Given Checks (103): ₺{given_checks_103:,.0f}\n"
+                f"- Inventory (15x): ₺{inventory:,.0f}\n"
+                f"- ST Liabilities (3xx): ₺{short_term_liab_net:,.0f}\n"
+                f"- **Current Ratio:** {round(current_ratio, 2)}x | **Quick Ratio:** {round(quick_ratio, 2)}x\n"
+                f"→ **Assessment:** Evaluate liquidity position. Flag if QR<1.0 or 103>102.\n\n"
+        
+                f"## 3. LEVERAGE & CAPITAL STRUCTURE:\n"
+                f"- LT Liabilities (4xx): ₺{long_term_liab_net:,.0f}\n"
+                f"- **Total Liabilities:** ₺{total_liab:,.0f} | **Total Equity (5xx):** ₺{total_equity_net:,.0f}\n"
+                f"- Total Bank Loans (300+400+309): ₺{total_bank_loans:,.0f} | D/E: {round(debt_to_equity, 2)}x | Bank Debt Ratio: {round(bank_debt_ratio, 2)}%\n"
+                f"- Fin. Expenses (780): ₺{fin_exp_780:,.0f} | Fin. Expense Ratio: {round(fin_expense_ratio, 2)}%\n"
+                f"→ **Assessment:** Evaluate leverage position and cost of debt.\n\n"
+        
+                f"## 4. WORKING CAPITAL & CASH CYCLE:\n"
+                f"- Trade Receivables (12x): ₺{trade_receivables:,.0f} → Collection: {collection_period:.0f} days\n"
+                f"- Trade Payables (32x): ₺{trade_payables:,.0f} → Payment: {payment_period:.0f} days\n"
+                f"- Inventory Period: {inventory_period:.0f} days | **CCC: {cash_conversion_cycle:.0f} days**\n"
+                f"- Insider Lending (131): ₺{insider_lending_131:,.0f} | Insider Borrowing (331): ₺{insider_borrowing_331:,.0f} → Ratio: {round(insider_lending_ratio, 2)}%\n"
+                f"→ **Assessment:** Evaluate CCC efficiency. Flag insider lending if >5% of assets.\n\n"
+        
+                f"## 5. CASH FLOW & FUTURE OBLIGATIONS (CRITICAL):\n"
+                f"- Period Cash Inflows (Debits 100,102,108): ₺{period_cash_inflow:,.0f}\n"
+                f"- Period Cash Outflows (Credits 100,102,108): ₺{period_cash_outflow:,.0f}\n"
+                f"- **Net Period Cash Movement:** ₺{period_net_cash_movement:,.0f}\n"
+                f"- Future Inflows (12x+101 closing): ₺{future_cash_inflow:,.0f}\n"
+                f"- Future Outflows (3xx+4xx+103 closing): ₺{future_cash_outflow:,.0f}\n"
+                f"- **Net Future Liquidity Position:** ₺{future_net_position:,.0f}\n"
+                f"→ **Assessment:** CRITICAL — flag funding gap or surplus. Compare historical burn rate vs future obligations.\n\n"
+        
+                f"## 6. COMPETITOR BANK DISTRIBUTION:\n"
+                f"**102-BANKALAR (Deposits):**\n{fmt_bank_shares('102', 'BANKALAR (Deposits)', banks_102)}\n\n"
+                f"**300-BANKA KREDİLERİ KV (ST Loans):**\n{fmt_bank_shares('300', 'BANKA KREDİLERİ KV (ST Loans)', banks_300)}\n\n"
+                f"**400-BANKA KREDİLERİ UV (LT Loans):**\n{fmt_bank_shares('400', 'BANKA KREDİLERİ UV (LT Loans)', banks_400)}\n"
+                f"→ **ING Status:** State ING's presence/absence in each category.\n\n"
+        
+                f"## BANKING INTELLIGENCE GUIDELINES:\n"
+                f"- CASH ANALYSIS: Compare Net Period Cash Movement with Net Future Liquidity Position. If bleeding cash + future deficit → critical risk.\n"
+                f"- CASH TRAPPING: Account 131 > 5% of Total Assets → Capital Leakage.\n"
+                f"- DUALITY CHECK: Account 103 > 102 → urgent liquidity risk.\n"
+                f"- CASH CONVERSION: CCC {cash_conversion_cycle:.0f} days. If high → working capital financing.\n"
+                f"- CROSS-SELL: Competitor bank with majority 300 but ING in 102 → loan buyout opportunity.\n"
+                f"- TAX AVOIDANCE: High OpProfit but low Net Profit → investigate non-operating expenses.\n\n"
+        
+                f"## OUTPUT FORMAT INSTRUCTIONS:\n"
+                f"Structure your analysis into EXACTLY these 6 sections. For EACH section:\n"
+                f"1. Cite the exact ₺ values and account codes provided above\n"
+                f"2. End each section with a clear **Assessment:** line (1-2 sentences)\n"
+                f"3. Use the section headers exactly as given:\n"
+                f"   ### 1. INCOME STATEMENT ANALYSIS\n"
+                f"   ### 2. BALANCE SHEET & LIQUIDITY\n"
+                f"   ### 3. LEVERAGE & CAPITAL STRUCTURE\n"
+                f"   ### 4. WORKING CAPITAL & CASH CYCLE\n"
+                f"   ### 5. CASH FLOW & FUTURE OBLIGATIONS\n"
+                f"   ### 6. COMPETITOR BANK DISTRIBUTION & ING STATUS\n"
             )
-            llm_text = invoke_llm(QUANT_ANALYST_SYSTEM_PROMPT, prompt, temperature=0.2, max_tokens=1500)
+            llm_text = invoke_llm(QUANT_ANALYST_SYSTEM_PROMPT, prompt, temperature=0.2, max_tokens=3000)
             self.metrics.record_llm_call(tokens=len(llm_text.split()))
             logger.info(f"✅ LLM interpretation: {len(llm_text)} chars")
         except Exception as e:
             logger.warning(f"LLM skipped: {e}")
             llm_text = "LLM interpretation unavailable."
-
+ 
         ratios["llm_interpretation"] = llm_text
         return {"financial_ratios": ratios, "retry_count": retry_count + 1}
-
-
-# Module-level callable for LangGraph
 quant_analyst_agent = QuantAnalystAgent()

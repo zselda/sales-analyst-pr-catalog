@@ -13,8 +13,10 @@ Now includes:
 The LLM receives ALL calculated values and produces the final report with banking reasoning.
 """
 
+import json
 import logging
 from agents.base import BaseAgent
+from agents.product_analyst import build_strategist_payload, FEW_SHOT_PROMPT_ADDITION
 from llm_config import invoke_llm, STRATEGY_AGENT_SYSTEM_PROMPT
 
 logger = logging.getLogger("swarm.agents.strategist")
@@ -60,9 +62,24 @@ class SalesStrategistAgent(BaseAgent):
         net_revenue = raw_val("gross_margin", "net_revenue")
         cogs = raw_val("gross_margin", "cogs_62x")
         gross_profit = raw_val("gross_margin", "gross_profit")
+        op_expenses = raw_val("operating_margin", "op_expenses_63x")
+        operating_profit = raw_val("operating_margin", "operating_profit")
         total_bank_loans = raw_val("bank_debt_ratio", "total_bank_loans")
+        fin_expenses_780 = raw_val("financial_expense_ratio", "finansman_giderleri_780")
         trade_recv = raw_val("collection_period", "trade_receivables")
         trade_pay = raw_val("payment_period", "trade_payables")
+        # Balance sheet raw values
+        current_assets = raw_val("current_ratio", "current_assets") or raw_val("insider_lending_ratio", "current_assets")
+        total_assets = raw_val("insider_lending_ratio", "total_assets")
+        total_equity = raw_val("debt_to_equity", "total_equity")
+        insider_131 = raw_val("insider_lending_ratio", "insider_lending_131")
+        insider_331 = raw_val("insider_lending_ratio", "insider_borrowing_331")
+        given_checks_103 = raw_val("check_risk_ratio", "given_checks_103")
+        banks_102_total = raw_val("check_risk_ratio", "banks_102_total")
+        # Cash flow
+        cash_flow = ratios.get("cash_flow_summary", {})
+        period_net_cash = cash_flow.get("period_net_movement", 0)
+        future_net_position = cash_flow.get("future_net_position", 0)
 
         # ══════════════════════════════════════════════════════════════
         # COMPETITOR BANK ANALYSIS — Handles nested category format
@@ -140,20 +157,31 @@ class SalesStrategistAgent(BaseAgent):
         estimated_wc_need = (ccc / period_days) * cogs if period_days > 0 and cogs > 0 else 0
 
         # ══════════════════════════════════════════════════════════════
-        # PRODUCT SIGNALS SECTION — from product_analyst
+        # PRODUCT SIGNALS SECTION — from product_analyst (ALL 5 COLUMNS)
         # ══════════════════════════════════════════════════════════════
         product_signal_lines = []
         product_interp = ""
+        sector = state.get('sector', 'General')
         if product_signals:
             product_interp = product_signals.get("llm_interpretation", "")
             for name, data in product_signals.items():
                 if name == "llm_interpretation":
                     continue
                 if isinstance(data, dict) and (data.get("balance", 0) != 0 or data.get("volume", 0) != 0):
+                    mapping_str = ", ".join(f"'{c}-{n}'" for c, n in data.get("account_mapping", {}).items())
                     product_signal_lines.append(
-                        f"- **{name}**: Balance=₺{data['balance']:,.0f}, Volume=₺{data['volume']:,.0f}"
+                        f"- **{name}**: Debit=₺{data.get('debit',0):,.0f}, Credit=₺{data.get('credit',0):,.0f}, "
+                        f"BalDebit=₺{data.get('balance_debit',0):,.0f}, BalCredit=₺{data.get('balance_credit',0):,.0f}, "
+                        f"Net=₺{data['balance']:,.0f}, Vol=₺{data['volume']:,.0f}, "
+                        f"Accounts: {{{mapping_str}}}"
                     )
         product_signal_text = "\n".join(product_signal_lines) if product_signal_lines else "No active product signals detected."
+
+        # Build compressed JSON payload for LLM context
+        strategist_payload = build_strategist_payload(
+            {"financial_ratios": ratios},
+            {"product_signals": product_signals}
+        )
 
         # ── Build comprehensive prompt with ALL local calculations ──
         prompt = (
@@ -178,12 +206,14 @@ class SalesStrategistAgent(BaseAgent):
             f"| Fin. Expense Ratio | {fer}% | POS Comm. Ratio | {pr}% |\n\n"
 
             f"## 💰 RAW ACCOUNT BALANCES & ESTIMATES\n"
-            f"- Net Revenue: ₺{net_revenue:,.0f}\n"
-            f"- COGS: ₺{cogs:,.0f}\n"
-            f"- Gross Profit: ₺{gross_profit:,.0f}\n"
-            f"- Trade Receivables: ₺{trade_recv:,.0f}\n"
-            f"- Trade Payables: ₺{trade_pay:,.0f}\n"
-            f"- Total Bank Loans: ₺{total_bank_loans:,.0f}\n"
+            f"- Net Revenue: ₺{net_revenue:,.0f} | COGS: ₺{cogs:,.0f} | Gross Profit: ₺{gross_profit:,.0f}\n"
+            f"- Operating Expenses (63x): ₺{op_expenses:,.0f} | Operating Profit: ₺{operating_profit:,.0f}\n"
+            f"- Current Assets: ₺{current_assets:,.0f} | Total Assets: ₺{total_assets:,.0f} | Total Equity: ₺{total_equity:,.0f}\n"
+            f"- Trade Receivables: ₺{trade_recv:,.0f} | Trade Payables: ₺{trade_pay:,.0f}\n"
+            f"- Total Bank Loans: ₺{total_bank_loans:,.0f} | Fin. Expenses (780): ₺{fin_expenses_780:,.0f}\n"
+            f"- Insider Lending (131): ₺{insider_131:,.0f} | Insider Borrowing (331): ₺{insider_331:,.0f}\n"
+            f"- Given Checks (103): ₺{given_checks_103:,.0f} | Bank Deposits (102): ₺{banks_102_total:,.0f}\n"
+            f"- Period Net Cash Movement: ₺{period_net_cash:,.0f} | Future Net Position: ₺{future_net_position:,.0f}\n"
             f"- Estimated Working Capital Need: ₺{estimated_wc_need:,.0f}\n\n"
 
             f"## 🏦 COMPETITOR BANK WALLET SHARE\n"
@@ -194,13 +224,17 @@ class SalesStrategistAgent(BaseAgent):
             f"### 400-BANKA KREDİLERİ UV (LT Loans):\n{cb_400}\n"
             f"**ING Status (LT Loans):** {ing_400}\n\n"
 
-            f"## 📦 PRODUCT SIGNALS (from Product Analyst)\n"
+            f"## 📦 PRODUCT SIGNALS — ALL 5 COLUMNS (from Product Analyst)\n"
+            f"**Company Sector: {sector}** — Prioritize sector-relevant products.\n\n"
             f"{product_signal_text}\n\n"
             f"### Product Analyst Intelligence:\n"
-            f"{str(product_interp)[:1000]}\n\n"
+            f"{str(product_interp)[:1500]}\n\n"
+
+            f"### Compressed Strategist Payload (JSON):\n"
+            f"```json\n{strategist_payload[:3000]}\n```\n\n"
 
             f"## 🔍 QUANT ANALYST INTELLIGENCE\n"
-            f"{str(quant_interp)[:1500]}\n\n"
+            f"{str(quant_interp)[:2000]}\n\n"
 
             f"## 🌐 COMMERCIAL NETWORK\n"
             f"**Customers ({len(custs)}):** {cust_str}\n"
@@ -212,17 +246,21 @@ class SalesStrategistAgent(BaseAgent):
             f"Using ALL the calculated values above, generate a report with deep analytical REASONING. "
             f"Act as a Senior Credit Allocation Manager at ING Bank Turkey. "
             f"Structure the report into exactly 8 sections in ENGLISH:\n\n"
-            f"1. Executive Summary: KPI dashboard table, 3-sentence overall risk/reward assessment.\n"
-            f"2. Financial Health & Cash Cycle Analysis: Cite explicit account codes. Analyze CCC ({ccc:.0f} days) and EBITDA.\n"
-            f"3. Hidden Risks & Capital Leakage: Analyze Insider Lending (131/331) and Check Risk (103 vs 102).\n"
-            f"4. Competitor Intelligence & ING Positioning: Use the ING status flags above. Identify refinancing targets FOR ING.\n"
-            f"5. Product Signals & Cross-Sell Opportunities: Use the product signal data to prioritize by ING revenue potential.\n"
-            f"6. CREDIT PROPOSAL & STRUCTURING (**CRITICAL**):\n"
+            f"1. EXECUTIVE SUMMARY: KPI dashboard table, 3-sentence overall risk/reward assessment, top 3 priorities.\n"
+            f"2. FINANCIAL HEALTH & CASH CYCLE ANALYSIS: Cite explicit account codes. Analyze CCC ({ccc:.0f} days), EBITDA, and Cash Flow (Net Period: ₺{period_net_cash:,.0f}, Future Position: ₺{future_net_position:,.0f}).\n"
+            f"3. COMPETITOR BANK INTELLIGENCE & ING POSITIONING: Use the ING status flags above. Identify refinancing targets FOR ING. Wallet share analysis.\n"
+            f"4. PRODUCT SIGNALS & CROSS-SELL OPPORTUNITIES: Use the product signal data AND sector ({sector}) to prioritize by ING revenue potential. Follow IF→THINKING→ACTION→PROPOSAL reasoning.\n"
+            f"5. CREDIT PROPOSAL & STRUCTURING (**CRITICAL**):\n"
             f"   - Propose Working Capital Limit justified by WC Need (₺{estimated_wc_need:,.0f}).\n"
             f"   - Break down into Cash Loans, Non-Cash Loans, and Refinancing.\n"
             f"   - Establish Covenants based on hidden risks.\n"
-            f"7. Risk Assessment & Mitigation: Severity ratings with evidence from calculated ratios.\n"
-            f"8. Action Plan: Concrete deliverables for the ING Bank Relationship Manager."
+            f"6. HIDDEN RISKS, CAPITAL LEAKAGE & CONCENTRATION: Analyze Insider Lending (131: ₺{insider_131:,.0f} / 331: ₺{insider_331:,.0f}), Check Risk (103: ₺{given_checks_103:,.0f} vs 102: ₺{banks_102_total:,.0f}), and Network concentration.\n"
+            f"7. RISK ASSESSMENT & MITIGATION: Severity ratings with evidence from calculated ratios.\n"
+            f"8. CRITICAL ACTION PLAN (Two-Tier):\n"
+            f"   **PRIMARY ACTIONS** (Revenue-generating): Credit limit proposal, product cross-sell, refinancing targets, key client meetings.\n"
+            f"   **SECONDARY ACTIONS** (Risk mitigation): Mizan acquisition of dominant network entities, covenant monitoring, insider lending remediation.\n"
+            f"   OVERRIDE: Only if liquidity crisis (QR<0.5), capital leakage (131>15%), or negative equity → 1st Priority = secure position.\n\n"
+            + FEW_SHOT_PROMPT_ADDITION
         )
 
         # ── Call LLM for report generation ──
