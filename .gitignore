@@ -51,3 +51,6 @@ backend/output/
 backend/*.txt
 backend/*.xlsx
 *.xlsx
+
+# Local customer database (generated/seeded at runtime)
+backend/data/customer_db.sqlite

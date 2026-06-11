@@ -1,24 +1,24 @@
 """
 Agent 4: Behavioral Analyst — Local Pandas + LLM interpretation
-
+ 
 Refactored to use BaseAgent for tracing and error isolation.
 """
-
+ 
 import logging
 import pandas as pd
 import numpy as np
 from agents.base import BaseAgent
 from llm_config import invoke_llm, BEHAVIORAL_SYSTEM_PROMPT
-
+ 
 logger = logging.getLogger("swarm.agents.behavioral")
-
-
+ 
+ 
 class BehavioralAnalystAgent(BaseAgent):
     name = "behavioral"
     description = "Analyze transaction patterns, cash flow, and competitor activity"
     required_inputs = ["transactions_data"]
     output_keys = ["behavioral_insights"]
-
+ 
     def execute(self, state: dict) -> dict:
         raw = state.get("transactions_data", [])
         # Transactions are optional — return defaults if empty
@@ -35,18 +35,18 @@ class BehavioralAnalystAgent(BaseAgent):
                 },
                 "llm_interpretation": "No transaction data available for analysis.",
             }}
-
+ 
         df = pd.DataFrame(raw)
         df["Date"] = pd.to_datetime(df["Date"])
         df["Month"] = df["Date"].dt.to_period("M").astype(str)
-
+ 
         # ── 1. Monthly Cash Flow ──
         inc = df[df["Type"] == "Incoming"].groupby("Month")["Amount"].sum()
         out = df[df["Type"] == "Outgoing"].groupby("Month")["Amount"].sum()
         mf = pd.DataFrame({"inflow": inc, "outflow": out}).fillna(0)
         mf["net_flow"] = mf["inflow"] - mf["outflow"]
         monthly_flow_dict = mf.reset_index().to_dict(orient="records")
-
+ 
         # ── 2. Top counterparties ──
         def top5(t):
             return (df[df["Type"] == t].groupby("Counterparty_Name")["Amount"]
@@ -55,7 +55,7 @@ class BehavioralAnalystAgent(BaseAgent):
                     .rename(columns={"sum": "total_amount", "count": "tx_count"})
                     .to_dict(orient="records"))
         top_in, top_out = top5("Incoming"), top5("Outgoing")
-
+ 
         # ── 3. Competitor bank activity ──
         comp_banks = ["Akbank", "Ziraat Bankasi", "Halkbank"]
         ct = df[df["Counterparty_Name"].isin(comp_banks)]
@@ -69,14 +69,14 @@ class BehavioralAnalystAgent(BaseAgent):
                                    .to_dict(orient="records")),
             "risk_flag": "HIGH" if len(ct) > 5 else "MODERATE" if len(ct) > 2 else "LOW",
         }
-
+ 
         # ── 4. Payment regularity ──
         sp = df[df["Description"].str.contains("Supplier|supplier|Raw material", case=False, na=False)]
         regularity = (sp.groupby("Counterparty_Name")
                       .agg(avg_amount=("Amount", "mean"), std_amount=("Amount", "std"),
                            tx_count=("Amount", "count"), total_amount=("Amount", "sum"))
                       .fillna(0).round(2).reset_index().to_dict(orient="records")) if len(sp) else []
-
+ 
         # ── 5. Cash crunch ──
         crunches = []
         for _, row in mf.iterrows():
@@ -85,7 +85,7 @@ class BehavioralAnalystAgent(BaseAgent):
                 crunches.append({"month": str(row.name), "net_flow": round(float(row["net_flow"]), 2),
                                  "severity_pct": round(sev, 1),
                                  "flag": "CRITICAL" if sev > 30 else "WARNING"})
-
+ 
         # ── 6. Collection mix ──
         pos = df[df["Description"].str.contains("POS", case=False, na=False)]
         xfr = df[df["Description"].str.contains("transfer", case=False, na=False)]
@@ -95,7 +95,7 @@ class BehavioralAnalystAgent(BaseAgent):
             "bank_transfers": {"count": len(xfr), "total": round(float(xfr["Amount"].sum()), 2)},
             "pos_share_pct": round(float(pos["Amount"].sum()) / ti * 100, 1) if ti else 0,
         }
-
+ 
         stats = {
             "total_transactions": len(df),
             "total_inflow": round(float(df[df["Type"] == "Incoming"]["Amount"].sum()), 2),
@@ -103,9 +103,9 @@ class BehavioralAnalystAgent(BaseAgent):
             "unique_counterparties": int(df["Counterparty_Name"].nunique()),
             "date_range": f"{df['Date'].min().strftime('%Y-%m-%d')} to {df['Date'].max().strftime('%Y-%m-%d')}",
         }
-
+ 
         logger.info(f"Local: {len(crunches)} crunches, risk={competitor['risk_flag']}")
-
+ 
         # ── LLM INTERPRETATION ──
         llm_text = ""
         try:
@@ -129,7 +129,7 @@ class BehavioralAnalystAgent(BaseAgent):
         except Exception as e:
             logger.warning(f"LLM skipped: {e}")
             llm_text = "LLM interpretation unavailable."
-
+ 
         return {"behavioral_insights": {
             "monthly_cash_flow": monthly_flow_dict,
             "top_incoming_counterparties": top_in,
@@ -141,7 +141,7 @@ class BehavioralAnalystAgent(BaseAgent):
             "summary_stats": stats,
             "llm_interpretation": llm_text,
         }}
-
-
+ 
+ 
 # Module-level callable for LangGraph
 behavioral_analyst_agent = BehavioralAnalystAgent()

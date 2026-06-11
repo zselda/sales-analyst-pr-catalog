@@ -8,7 +8,7 @@ Wires agents into a LangGraph StateGraph with:
 - Strategist for final sales report
 
 Architecture:
-  START → data_ingestion → quant_analyst → verifier
+  START → data_ingestion → db_enrichment → quant_analyst → verifier
                                             ↓ (conditional)
                               approved → product_analyst → network_mapper → strategist → END
                               rejected → quant_analyst (loop back)
@@ -21,6 +21,7 @@ from langgraph.graph import StateGraph, START, END
 
 from agents.state import SwarmState
 from agents.data_ingestion import data_ingestion_agent
+from agents.db_enrichment import db_enrichment_agent
 from agents.quant_analyst import quant_analyst_agent
 from agents.verifier import verifier_agent, should_retry_or_continue
 from agents.product_analyst import product_analyst_agent
@@ -66,15 +67,17 @@ def build_swarm_graph() -> StateGraph:
 
     # Nodes
     builder.add_node("data_ingestion", data_ingestion_agent)
+    builder.add_node("db_enrichment", db_enrichment_agent)
     builder.add_node("quant_analyst", quant_analyst_agent)
     builder.add_node("verifier", verifier_agent)
     builder.add_node("product_analyst", product_analyst_agent)
     builder.add_node("network_mapper", network_mapper_agent)
     builder.add_node("strategist", sales_strategist_agent)
 
-    # Sequential: START → data_ingestion → quant_analyst → verifier
+    # Sequential: START → data_ingestion → db_enrichment → quant_analyst → verifier
     builder.add_edge(START, "data_ingestion")
-    builder.add_edge("data_ingestion", "quant_analyst")
+    builder.add_edge("data_ingestion", "db_enrichment")
+    builder.add_edge("db_enrichment", "quant_analyst")
     builder.add_edge("quant_analyst", "verifier")
 
     # Verifier conditional: approved → product_analyst, rejected → retry
@@ -111,7 +114,7 @@ def build_standalone_graph(generate_turkish: bool = False):
     Adds an optional translator node after strategist when generate_turkish=True.
 
     Architecture (with translation):
-      START → data_ingestion → quant_analyst → verifier
+      START → data_ingestion → db_enrichment → quant_analyst → verifier
                                                 ↓ (conditional)
                                   approved → product_analyst → network_mapper → strategist → translator → END
                                   rejected → quant_analyst (loop back)
@@ -123,15 +126,17 @@ def build_standalone_graph(generate_turkish: bool = False):
 
     # Nodes
     builder.add_node("data_ingestion", data_ingestion_agent)
+    builder.add_node("db_enrichment", db_enrichment_agent)
     builder.add_node("quant_analyst", quant_analyst_agent)
     builder.add_node("verifier", verifier_agent)
     builder.add_node("product_analyst", product_analyst_agent)
     builder.add_node("network_mapper", network_mapper_agent)
     builder.add_node("strategist", sales_strategist_agent)
 
-    # Sequential: START → data_ingestion → quant_analyst → verifier
+    # Sequential: START → data_ingestion → db_enrichment → quant_analyst → verifier
     builder.add_edge(START, "data_ingestion")
-    builder.add_edge("data_ingestion", "quant_analyst")
+    builder.add_edge("data_ingestion", "db_enrichment")
+    builder.add_edge("db_enrichment", "quant_analyst")
     builder.add_edge("quant_analyst", "verifier")
 
     # Verifier conditional

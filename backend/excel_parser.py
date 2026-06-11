@@ -260,8 +260,15 @@ def predict_sector(customers: list, suppliers: list) -> str:
     """
     Use the LLM to predict the corporate sector from customer/supplier names.
 
-    Returns a short sector string like "Textile", "Food & Beverage", "Automotive", etc.
-    Falls back to "General" if LLM is unavailable.
+    Multi-sector aware: many companies belong to more than one sector
+    (e.g., a retailer that also exports goods). The LLM may return up to
+    three sectors joined with ' + ', primary first (e.g., 'Retail + Export').
+    Textile is split into two sub-categories: 'Textile Manufacturing' and
+    'Textile Manufacturing + Export'.
+
+    The base vocabulary is aligned with the TCMB sector benchmarks in
+    data/tcmb_sector_benchmarks.json so downstream agents can match it.
+    Falls back to "General" if the LLM is unavailable.
     """
     try:
         from llm_config import invoke_llm
@@ -280,28 +287,42 @@ def predict_sector(customers: list, suppliers: list) -> str:
         entity_text += f"Suppliers: {', '.join(supp_names)}\n"
 
     if not entity_text:
+        logger.warning("⚠️ Sector prediction absent: no customer/supplier names available — using 'General'")
         return "General"
 
     system_prompt = (
         "You are a business analyst. Given a list of customer and supplier names, "
-        "predict the primary industry/sector of the company. "
-        "Reply with ONLY the sector name in 1-3 words (e.g. 'Textile', 'Food & Beverage', "
-        "'Automotive', 'Construction', 'Retail', 'Technology', 'Healthcare'). "
-        "Do not include any explanation."
+        "predict the company's industry sector(s).\n"
+        "RULES:\n"
+        "- Reply with ONLY the sector label. No explanation.\n"
+        "- Use base sectors from this list: Manufacturing, Trading, Retail, Construction, "
+        "Services, Textile, Food & Beverage, Automotive, Energy, "
+        "Transportation & Logistics, Technology, Agriculture, Tourism, Chemicals.\n"
+        "- MULTI-SECTOR: Many companies operate in multiple sectors (e.g., a retailer "
+        "that also exports). If more than one applies, join up to THREE with ' + ', "
+        "primary sector FIRST (e.g., 'Retail + Export', 'Food & Beverage + Trading').\n"
+        "- EXPORT/IMPORT modifiers: append ' + Export' or ' + Import' when foreign "
+        "customer/supplier names indicate cross-border trade.\n"
+        "- TEXTILE special rule: distinguish the two sub-categories "
+        "'Textile Manufacturing' (domestic producer) vs "
+        "'Textile Manufacturing + Export' (producer with foreign buyers).\n"
     )
 
-    prompt = f"Based on these business partners, what sector does this company operate in?\n\n{entity_text}"
+    prompt = f"Based on these business partners, what sector(s) does this company operate in?\n\n{entity_text}"
 
     try:
         sector = invoke_llm(system_prompt, prompt, temperature=0.1, max_tokens=256)
         # Clean: take first line, strip quotes/punctuation
         sector = sector.strip().split("\n")[0].strip().strip('"').strip("'").strip(".")
-        if len(sector) > 40:
-            sector = sector[:40]
-        logger.info(f"Predicted sector: {sector}")
-        return sector or "General"
+        if len(sector) > 60:
+            sector = sector[:60]
+        if not sector:
+            logger.warning("⚠️ Sector prediction absent: LLM returned empty sector — using 'General'")
+            return "General"
+        logger.info(f"Predicted sector(s): {sector}")
+        return sector
     except Exception as e:
-        logger.warning(f"Sector prediction failed: {e}")
+        logger.warning(f"⚠️ Sector prediction absent: prediction failed ({e}) — using 'General'")
         return "General"
 
 

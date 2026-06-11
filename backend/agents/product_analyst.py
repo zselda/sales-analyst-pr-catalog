@@ -3,9 +3,12 @@ Agent: Autonomous Product Analyst — Banking Product Signal Extraction
 Uses Tool Calling to autonomously query the standardized Mizan data.
 Finds cross-sell opportunities for ING Bank (loans, POS, DBS, trade finance, etc.)
 by actively searching account codes and keywords.
-
+ 
 Enhanced with:
-- Few-shot prompting guide (MIZAN_FEW_SHOT_GUIDE) for hallucination-free analysis
+- Selective few-shot prompting via agents/few_shot_library.py — only scenarios
+  with detected product signals are injected (token-efficient)
+- Current-usage awareness: products flagged as used in the local bank DB
+  (db_product_flags) are excluded from recommendations
 - All 5 columns: credit, debit, balance_debit, balance_credit, volume
 - build_strategist_payload() data aggregator for strategist agent
 - Sector-aware product suggestions
@@ -13,178 +16,21 @@ Enhanced with:
 import json
 import logging
 import pandas as pd
+import re
 from agents.base import BaseAgent
+import warnings
+warnings.filterwarnings("ignore")
 from llm_config import invoke_llm, PRODUCT_ANALYST_SYSTEM_PROMPT
+from agents.few_shot_library import (
+    classify_product_opportunities,
+    build_few_shot_injection,
+    build_recommendation_catalog,
+)
 logger = logging.getLogger("swarm.agents.product_analyst")
-
-# ══════════════════════════════════════════════════════════════
-# FEW-SHOT PROMPTING GUIDE — ING TURKEY PRODUCT ANALYSIS
-# ══════════════════════════════════════════════════════════════
-MIZAN_FEW_SHOT_GUIDE = {
-    "core_mizan_rules": [
-        "DO NOT invent or search for account codes. Only use the exact balances, volumes, and sub-account names explicitly provided to you in the prompt by the Python system.",
-        "Follow the IF -> THINKING -> ACTION -> PROPOSAL reasoning structure for your analysis.",
-        "Map all proposals to specific ING Turkey products (e.g., 'ING DBS', 'ING e-Turuncu Kur', 'ING Bonus Business').",
-        "Use the company's SECTOR information to prioritize relevant products. A manufacturing firm needs different products than a trading or services firm.",
-        "Distinguish between BALANCE (stock at period-end) and VOLUME (flow during period). High volume with low balance = healthy turnover."
-    ],
-    "sector_product_priority": {
-        "Manufacturing / Üretim": ["Leasing (253)", "Working Capital Loans", "Supply Chain Finance", "Fleet Insurance", "Payroll", "FX (if exporter)"],
-        "Trading / Ticaret": ["POS/VPOS", "DBS", "Corporate Credit Card", "Check Products", "Commercial Loans", "FX/SWIFT"],
-        "Construction / İnşaat": ["Letter of Guarantee (Teminat Mektubu)", "Progress Payment Finance (170/350)", "Leasing (253)", "Surety Bonds"],
-        "Services / Hizmet": ["POS/VPOS", "Payroll", "Corporate Credit Card", "Cash Management", "Digital Banking"],
-        "Export / İhracat": ["Trade Finance", "Letter of Credit", "FX/e-Turuncu Kur", "SWIFT", "Export Factoring"],
-        "Import / İthalat": ["Trade Finance", "Letter of Credit", "FX/e-Turuncu Kur", "Import Loans", "Customs Guarantee"],
-        "Retail / Perakende": ["POS/VPOS", "DBS", "Cash Management", "Payroll", "Corporate Credit Card"]
-    },
-    "few_shot_examples": [
-        {
-            "scenario": "Retail Collection & Explicit POS Opportunity",
-            "input_signals": {
-                "108 - Diğer Hazır Değerler": {"balance": 2000000, "volume": 85000000},
-                "System Explicit Keyword Matches": ["780.01.002 - POS Komisyon Giderleri"]
-            },
-            "reasoning_process": {
-                "IF": "108 Volume > 0 AND the Python system explicitly flagged 'POS' keywords in sub-accounts",
-                "THINKING": "Company collects heavily via credit cards and the system confirmed they are actively paying POS commissions to competitor banks.",
-                "ACTION": "Cite the system-provided sub-account directly as definitive proof.",
-                "PROPOSAL": "Offer 'ING Fiziki POS', 'ING Sanal POS', or 'CebimPOS' with competitive commission rates."
-            },
-            "expected_output": "- **POS / Virtual POS**: Detected massive credit card collection volume (108: ₺85,000,000). Confirmed active POS usage via (780.01.002 - POS Komisyon Giderleri). Strong cross-sell for **ING Fiziki POS** or **ING Sanal POS**."
-        },
-        {
-            "scenario": "DBS (Direct Debit) & Competitor Refinancing",
-            "input_signals": {
-                "120 - Alıcılar": {"balance": 30000000, "volume": 60000000},
-                "System Explicit Keyword Matches": ["120.04.050 - B Bankası DBS Alacakları"]
-            },
-            "reasoning_process": {
-                "IF": "120 volume is high AND the system flagged 'DBS' in sub-accounts",
-                "THINKING": "Company has a B2B dealer network and the system found proof they use a competitor's DBS.",
-                "ACTION": "Highlight the confirmed sub-account to target competitor wallet share.",
-                "PROPOSAL": "Offer 'ING DBS' to refinance competitor collections."
-            },
-            "expected_output": "- **Collection/DBS**: Massive B2B collection volume. System confirms existing competitor usage (120.04.050 - B Bankası DBS Alacakları). Prime target for **ING DBS**."
-        },
-        {
-            "scenario": "Fleet Assets & Confirmed Insurance Cross-Sell",
-            "input_signals": {
-                "254 - Taşıtlar": {"balance": 18000000, "volume": 2000000},
-                "System Explicit Keyword Matches": ["770.03.005 - Araç Kasko Giderleri"]
-            },
-            "reasoning_process": {
-                "IF": "254 > 0 AND system extracted 'KASKO/SİGORTA' from expense accounts",
-                "THINKING": "Company owns a fleet and Python confirmed they actively pay insurance premiums.",
-                "ACTION": "Use the extracted expense account to size the opportunity.",
-                "PROPOSAL": "Cross-sell 'ING Kasko / Filo Sigortası'."
-            },
-            "expected_output": "- **Insurance / Fleet**: Vehicle assets (254: ₺18,000,000) with confirmed insurance payments (770.03.005 - Araç Kasko Giderleri). Refer to ING Insurance for **ING Kasko / Filo Sigortası**."
-        },
-        {
-            "scenario": "Check Products — Received & Issued Checks",
-            "input_signals": {
-                "101 - Alınan Çekler": {"balance": 5000000, "volume": 40000000},
-                "103 - Verilen Çekler": {"balance": 3000000, "volume": 25000000}
-            },
-            "reasoning_process": {
-                "IF": "101 Volume > 0 OR 103 Volume > 0",
-                "THINKING": "Company actively uses checks for both collections and payments. High volume indicates B2B trade dependency on check instruments.",
-                "ACTION": "Size the check portfolio and propose ING check financing products.",
-                "PROPOSAL": "Offer 'ING Çek Karnesi', 'ING Çek İskontosu/İştira' for received checks, check guarantee for issued checks."
-            },
-            "expected_output": "- **Check Products**: Active check usage — Received (101: Vol ₺40M, Bal ₺5M), Issued (103: Vol ₺25M, Bal ₺3M). Propose **ING Çek İskontosu** for receivables financing and **ING Çek Karnesi**."
-        },
-        {
-            "scenario": "Trade Finance & Export Revenue (Sector: Export/Manufacturing)",
-            "input_signals": {
-                "601 - Yurtdışı Satışlar": {"balance": 0, "volume": 50000000},
-                "System Explicit Keyword Matches": ["159.02 - İthalat Avansları", "780.05 - Akreditif Komisyonları"]
-            },
-            "reasoning_process": {
-                "IF": "601 Volume > 0 AND system flagged 'İTHALAT/AKREDİTİF' keywords",
-                "THINKING": "Company is an active exporter/importer. Export revenue confirms international trade. System found LC commission expenses proving they use trade finance elsewhere.",
-                "ACTION": "Cite export revenue and LC expenses as proof of trade finance need.",
-                "PROPOSAL": "Offer 'ING Akreditif', 'ING İhracat Faktoring', 'ING Döviz Kredisi'."
-            },
-            "expected_output": "- **Trade Finance**: Active exporter (601: ₺50M). Confirmed LC usage (780.05 - Akreditif Komisyonları). Propose **ING Akreditif**, **ING İhracat Faktoring**, and **ING Döviz Kredisi**."
-        },
-        {
-            "scenario": "FX Activity & Currency Hedging",
-            "input_signals": {
-                "646 - Kambiyo Karları": {"balance": 0, "volume": 8000000},
-                "656 - Kambiyo Zararları": {"balance": 0, "volume": 12000000}
-            },
-            "reasoning_process": {
-                "IF": "646 + 656 total volume > 0",
-                "THINKING": "Company has significant FX exposure. Net FX loss (656 > 646) indicates unhedged currency risk.",
-                "ACTION": "Calculate net FX impact and recommend hedging products.",
-                "PROPOSAL": "Offer 'ING e-Turuncu Kur' for FX trading, 'ING Forward/Opsiyon' for hedging."
-            },
-            "expected_output": "- **FX & Hedging**: Significant FX exposure (646: ₺8M gains, 656: ₺12M losses = Net ₺4M loss). Unhedged risk. Propose **ING e-Turuncu Kur** and **ING Forward/Opsiyon** for currency hedging."
-        },
-        {
-            "scenario": "Payroll & Personnel (Sector-aware: Manufacturing/Services)",
-            "input_signals": {
-                "720/730/760/770 - Personnel Expenses": {"balance": 0, "volume": 15000000}
-            },
-            "reasoning_process": {
-                "IF": "Personnel expense volume > 0",
-                "THINKING": "Company has significant payroll. Manufacturing/services firms with large workforce = payroll banking opportunity.",
-                "ACTION": "Estimate employee count from average salary and propose payroll package.",
-                "PROPOSAL": "Offer 'ING Maaş Ödemesi Paketi', employee banking cross-sell."
-            },
-            "expected_output": "- **Payroll**: ₺15M personnel expenses. Estimate ~200 employees. Propose **ING Maaş Ödemesi Paketi** with employee banking cross-sell (ING Turuncu Hesap)."
-        },
-        {
-            "scenario": "Corporate Credit Card Signal",
-            "input_signals": {
-                "309 - Diğer Mali Borçlar": {"balance": 2000000, "volume": 10000000},
-                "System Explicit Keyword Matches": ["309.01 - Şirket Kredi Kartı Borçları"]
-            },
-            "reasoning_process": {
-                "IF": "309 balance > 0 AND system flagged 'KREDİ KARTI' keywords",
-                "THINKING": "Company uses corporate credit cards actively with competitor banks.",
-                "ACTION": "Cite the flagged sub-account as proof of competitor card usage.",
-                "PROPOSAL": "Offer 'ING Bonus Business Kart' with competitive limits and cashback."
-            },
-            "expected_output": "- **Corporate Credit Card**: Active card usage (309.01 - Şirket Kredi Kartı Borçları: ₺2M balance, ₺10M volume). Propose **ING Bonus Business Kart** with competitive limits."
-        },
-        {
-            "scenario": "Supplier Finance (TFS/SCF) — Manufacturing Sector",
-            "input_signals": {
-                "320 - Satıcılar": {"balance": 20000000, "volume": 80000000},
-                "System Explicit Keyword Matches": ["320.05 - TFS Borçları"]
-            },
-            "reasoning_process": {
-                "IF": "320 volume is high AND system flagged 'TFS/TEDARİKÇİ' keywords AND sector is Manufacturing/Trading",
-                "THINKING": "Company has large supplier payables and already uses supply chain finance. Sector confirms strong upstream dependency.",
-                "ACTION": "Size the SCF opportunity from trade payables volume.",
-                "PROPOSAL": "Offer 'ING Tedarik Zinciri Finansmanı' to capture supplier payments."
-            },
-            "expected_output": "- **Supplier Finance (TFS)**: Large supplier payables (320: ₺80M volume). Confirmed TFS usage (320.05 - TFS Borçları). Manufacturing sector = strong SCF fit. Propose **ING Tedarik Zinciri Finansmanı**."
-        },
-        {
-            "scenario": "Deposit Capture Opportunity",
-            "input_signals": {
-                "102 - Bankalar": {"balance": 25000000, "volume": 150000000},
-                "ING Not Present in 102 sub-accounts": True
-            },
-            "reasoning_process": {
-                "IF": "102 balance > 0 AND ING is NOT present in 102 sub-accounts",
-                "THINKING": "Company holds significant deposits at competitor banks. ING has zero share of deposits — this is a greenfield opportunity.",
-                "ACTION": "Flag as priority deposit capture target.",
-                "PROPOSAL": "Offer 'ING Turuncu Vadesiz', 'ING e-Turuncu Mevduat' with competitive rates to capture deposit flow."
-            },
-            "expected_output": "- **Deposit Capture**: ₺25M deposits at competitors, ING has 0% share. Priority acquisition target. Propose **ING Turuncu Vadesiz** and **ING e-Turuncu Mevduat** with competitive rates."
-        }
-    ]
-}
-
-FEW_SHOT_PROMPT_ADDITION = f"""
-## REASONING HEURISTICS & ING TURKEY FEW-SHOT EXAMPLES
-Internalize this logic. Rely ONLY on the data and keyword matches explicitly provided to you by the system. Do not guess sub-accounts.
-{json.dumps(MIZAN_FEW_SHOT_GUIDE, indent=2, ensure_ascii=False)}
-"""
+ 
+# Few-shot scenarios and the product classification/selection logic now
+# live in agents/few_shot_library.py. Only scenarios whose product signals
+# are present in the Mizan data are injected into the prompts.
 
 
 def build_strategist_payload(quant_state: dict, product_state: dict) -> str:
@@ -195,18 +41,18 @@ def build_strategist_payload(quant_state: dict, product_state: dict) -> str:
     """
     ratios = quant_state.get("financial_ratios", {})
     signals = product_state.get("product_signals", {})
-
+ 
     donem_ctx = ratios.get("donem_context", {})
     period_days = donem_ctx.get("period_days", 360)
-
+ 
     # Helper to safely extract raw values from nested ratio dicts
     def rv(ratio_name: str, key: str):
         return ratios.get(ratio_name, {}).get("raw_values", {}).get(key, 0)
-
+ 
     cogs = rv("gross_margin", "cogs_62x")
     ccc_val = ratios.get("cash_conversion_cycle", {}).get("value", 0)
     estimated_wc = (ccc_val / period_days) * cogs if period_days > 0 and cogs > 0 else 0
-
+ 
     payload = {
         "context": {
             "period": donem_ctx.get("label", "Unknown"),
@@ -288,16 +134,16 @@ def build_strategist_payload(quant_state: dict, product_state: dict) -> str:
             }
             for k, v in signals.items()
             if isinstance(v, dict) and (v.get("balance", 0) != 0 or v.get("volume", 0) != 0)
-        },
-        # ── 9. ANALYST INSIGHTS ──
-        "analyst_insights": {
-            "quant_summary": str(ratios.get("llm_interpretation", ""))[:2500],
-            "product_summary": str(signals.get("llm_interpretation", ""))[:2500]
         }
+       # # ── 9. ANALYST INSIGHTS ──
+       # "analyst_insights": {
+       #     "quant_summary": str(ratios.get("llm_interpretation", "")),
+       #     "product_summary": str(signals.get("llm_interpretation", ""))
+       # }
     }
-
+ 
     return json.dumps(payload, indent=2, ensure_ascii=False)
-
+ 
 class ProductAnalystAgent(BaseAgent):
    name = "product_analyst"
    description = "Autonomously query Mizan to extract banking product signals using tools"
@@ -328,7 +174,7 @@ class ProductAnalystAgent(BaseAgent):
        logger.info(f"✅ Dynamic Period: {raw_donem} -> {period_months} Months ({period_days} days)")
        # Hesap kodlarını string'e çevir
        df["account_code"] = df["account_code"].astype(str).str.replace(",", ".").str.strip()
-
+ 
        # ══════════════════════════════════════════════════════════════
        # SIGNAL EXTRACTION ENGINE
        # ══════════════════════════════════════════════════════════════
@@ -336,26 +182,27 @@ class ProductAnalystAgent(BaseAgent):
             """
             Search for specified account codes and keywords.
             Prevents double-counting via leaf-node filtering.
-
+ 
             Returns dict with: credit, debit, balance_debit, balance_credit,
             balance (net), volume (gross flow), account_mapping {code: name}
             """
             prefix_tuple = tuple(prefixes)
             clean_codes = df["account_code"].astype(str).str.replace(",", ".").str.strip()
             mask_code = clean_codes.str.startswith(prefix_tuple)
-
+ 
             if keywords:
-                pattern = "|".join(keywords)
+                escaped_keywords = [re.escape(k) for k in keywords]
+                pattern = r'(?<!\w)(' + '|'.join(escaped_keywords) + r')(?!\w)'
                 mask_word = df["account_name"].str.contains(pattern, case=False, na=False)
                 filtered_df = df[mask_code & mask_word]
             else:
                 filtered_df = df[mask_code]
-
+ 
             if filtered_df.empty:
                 return {"credit": 0.0, "debit": 0.0, "balance_debit": 0.0,
                         "balance_credit": 0.0, "balance": 0.0, "volume": 0.0,
                         "account_mapping": {}}
-
+ 
             # Leaf-node filter to prevent double-counting parent/child rows
             codes = filtered_df["account_code"].astype(str).str.replace(",", ".").str.strip().tolist()
             leaf_codes = []
@@ -364,28 +211,60 @@ class ProductAnalystAgent(BaseAgent):
                 if not is_parent:
                     leaf_codes.append(code)
             final_df = filtered_df[clean_codes.isin(leaf_codes)]
-            account_mapping = dict(zip(final_df["account_code"].astype(str), final_df["account_name"].astype(str)))
-
+            # account_mapping = dict(zip(final_df["account_code"].astype(str), final_df["account_name"].astype(str)))
+ 
+            if account_type == "debit":
+                volume_col = "debit"
+                balance_col = "balance_debit"
+            else:
+                volume_col = "credit"
+                balance_col = "balance_credit"
+            # volume'a göre sırala
+            final_df = final_df.sort_values(by=volume_col, ascending=False)
+            # toplam volume
+            total_volume = final_df[volume_col].sum()
+            if total_volume > 0 and len(final_df)>10:
+                final_df["cum_ratio"] = final_df[volume_col].cumsum() / total_volume
+                cutoff_idx = final_df["cum_ratio"].searchsorted(0.8)
+                final_df = final_df.iloc[:cutoff_idx+1]
+                # en az 1 satır garanti
+                if final_df.empty:
+                    final_df = filtered_df.sort_values(by=volume_col, ascending=False).head(1)
+                # max 10 satır
+                final_df = final_df.head(10)
+            # ---------------------------
+            # mapping
+            account_mapping = dict(zip(
+                final_df["account_code"].astype(str) + " " + final_df["account_name"].astype(str),
+                "volume: " + final_df[volume_col].astype(str)
+            ))
             # All 5 columns
             total_credit = float(final_df["credit"].sum())
             total_debit = float(final_df["debit"].sum())
             total_bal_debit = float(final_df["balance_debit"].sum()) if "balance_debit" in final_df.columns else 0.0
             total_bal_credit = float(final_df["balance_credit"].sum()) if "balance_credit" in final_df.columns else 0.0
-
+ 
             if account_type == "debit":
                 balance = total_debit - total_credit
                 volume = total_debit
             else:
                 balance = total_credit - total_debit
                 volume = total_credit
-
+ 
             return {
                 "credit": total_credit, "debit": total_debit,
                 "balance_debit": total_bal_debit, "balance_credit": total_bal_credit,
                 "balance": balance, "volume": volume,
                 "account_mapping": account_mapping
             }
-        
+ 
+       def get_account_mapping(data):
+            signal_lines = []
+            mapping_str = ", ".join(f"'{c} - {n}'" for c, n in data.get("account_mapping", {}).items())
+            signal_lines.append(
+                    f": Balance=₺{data.get('balance', 0):,.0f}, Volume=₺{data.get('volume', 0):,.0f}, Accounts: {{{mapping_str}}}"
+                )
+            return mapping_str
         # ── 1. LOAN SIGNALS ──
        loan_300 = get_signal_metrics(["300"], [], "credit")
        loan_400 = get_signal_metrics(["400"], [], "credit")
@@ -399,32 +278,24 @@ class ProductAnalystAgent(BaseAgent):
              "account_mapping": {**loan_300.get("account_mapping", {}), **loan_400.get("account_mapping", {})}
          }
        financial_expenses = get_signal_metrics(["780"], [], "debit")
-        
         # ── 2. POS / VPOS (Virtual POS) SIGNALS ──
        pos_collection = get_signal_metrics(["108"], [], "debit")
        pos_expenses = get_signal_metrics(["760", "780"], ["POS", "SANAL", "YAZARKASA"], "debit")
-        
         # ── 3. DIRECT DEBIT SYSTEM (DBS) POTENTIAL ──
        dbs_usage = get_signal_metrics(["120", "320", "300"], ["DBS", "DOĞRUDAN BORÇLANDIRMA"], "debit")
-        
         # ── 4. SUPPLIER FINANCE (TFS/SCF) POTENTIAL ──
        tfs_usage = get_signal_metrics(["320", "300"], ["TFS", "TEDARİKÇİ", "TEDARİK FİNANSMANI"], "credit")
-        
         # ── 5. CORPORATE CREDIT CARD SIGNAL ──
        corporate_credit_card = get_signal_metrics(["309", "300", "336"], ["KREDİ KARTI", "K.KARTI", "ŞİRKET KARTI"], "credit")
-        
         # ── 6. VEHICLE FLEET & INSURANCE ──
        vehicle_fleet_assets = get_signal_metrics(["254"], [], "debit")
        insurance_expenses = get_signal_metrics(["730", "760", "770"], ["SİGORTA", "KASKO", "TRAFİK", "POLİÇE"], "debit")
-        
         # ── 7. CHECK PRODUCTS ──
        received_checks = get_signal_metrics(["101"], [], "debit")
        issued_checks = get_signal_metrics(["103"], [], "credit")
-        
         # ── 8. TRADE FINANCE & LETTER OF CREDIT ──
        export_revenue = get_signal_metrics(["601"], [], "credit")
        trade_finance_expenses = get_signal_metrics(["159", "340", "120", "320"], ["İTHALAT", "İHRACAT", "AKREDİTİF", "GÜMRÜK"], "debit")
-        
         # ── 9. FX & SWIFT ──
        fx_profits = get_signal_metrics(["646"], [], "credit")
        fx_losses = get_signal_metrics(["656"], [], "debit")
@@ -438,10 +309,8 @@ class ProductAnalystAgent(BaseAgent):
              "account_mapping": {**fx_profits.get("account_mapping", {}), **fx_losses.get("account_mapping", {})}
          }
        swift_transfer_expenses = get_signal_metrics(["780"], ["SWIFT", "TRANSFER", "HAVALE", "EFT", "YURTDIŞI"], "debit")
-        
         # ── 10. PAYROLL & PERSONNEL ──
        payroll_personnel_volume = get_signal_metrics(["720", "730", "760", "770"], ["PERSONEL", "İŞÇİ", "MAAŞ", "ÜCRET", "SGK"], "debit")
-        
         # ── 11. SECTORAL CALCULATIONS ──
        construction_costs = get_signal_metrics(["170"], [], "debit")
        progress_billings = get_signal_metrics(["350"], [], "credit")
@@ -449,12 +318,16 @@ class ProductAnalystAgent(BaseAgent):
        direct_labor_costs = get_signal_metrics(["720"], [], "debit")
        manufacturing_overhead = get_signal_metrics(["730"], [], "debit")
        commercial_goods = get_signal_metrics(["153"], [], "debit")
-       marketing_sales_expenses = get_signal_metrics(["760"], [], "debit")
-        
+       marketing_sales_expenses = get_signal_metrics(["760"], ['PAZARLAMA'], "debit")
+        # ── 12. NEW PRODUCT SIGNALS (factoring, leasing, guarantees, cash mgmt, e-commerce) ──
+       notes_receivable = get_signal_metrics(["121"], [], "debit")
+       leasing_payables = get_signal_metrics(["301", "401"], [], "credit")
+       guarantee_commissions = get_signal_metrics(["760", "770", "780"], ["TEMİNAT"], "debit")
+       bank_transaction_volume = get_signal_metrics(["102"], [], "debit")
+       ecommerce_revenue = get_signal_metrics(["600", "649"], ["E-TİCARET", "ETİCARET", "E TİCARET", "ONLINE", "PAZARYERİ", "SANAL"], "credit")
         # ══════════════════════════════════════════════════════════════
         # FINAL PRODUCT SIGNALS DICTIONARY
         # ══════════════════════════════════════════════════════════════
-        
        product_signals = {
            "Bank Loans (300 + 400)": loan_metrics,
            "Total Financial Expenses (780)": financial_expenses,
@@ -478,8 +351,14 @@ class ProductAnalystAgent(BaseAgent):
            "Manufacturing Overhead (730)": manufacturing_overhead,
            "Commercial Goods (153)": commercial_goods,
            "Marketing Sales": marketing_sales_expenses,
+           "Trade Finance Signals (159/340)": trade_finance_expenses,
+           "Notes Receivable (121)": notes_receivable,
+           "Leasing Payables (301/401)": leasing_payables,
+           "Guarantee Letter Commissions": guarantee_commissions,
+           "Bank Transaction Volume (102)": bank_transaction_volume,
+           "E-Commerce Revenue": ecommerce_revenue,
        }
-         
+       zero_volumes = [key for key, inner_dict in product_signals.items() if inner_dict.get('volume')==0]
        # Log non-zero signals
        active_signals = {k: v for k, v in product_signals.items()
                         if isinstance(v, dict) and (v.get("balance", 0) != 0 or v.get("volume", 0) != 0)}
@@ -488,73 +367,179 @@ class ProductAnalystAgent(BaseAgent):
            logger.info(f"  - {name}: balance=₺{data['balance']:,.0f}, volume=₺{data['volume']:,.0f}")
        # ── LLM INTERPRETATION ──
        llm_text = ""
-       try:
-           signal_lines = []
-           for name, data in product_signals.items():
-               if isinstance(data, dict) and (data.get("balance", 0) != 0 or data.get("volume", 0) != 0):
-                   mapping_str = ", ".join(f"'{c} - {n}'" for c, n in data.get("account_mapping", {}).items())
-                   signal_lines.append(
-                       f"- **{name}**: Debit=₺{data.get('debit', 0):,.0f}, Credit=₺{data.get('credit', 0):,.0f}, "
-                       f"BalDebit=₺{data.get('balance_debit', 0):,.0f}, BalCredit=₺{data.get('balance_credit', 0):,.0f}, "
-                       f"Net=₺{data.get('balance', 0):,.0f}, Volume=₺{data.get('volume', 0):,.0f}, "
-                       f"Sub-Accounts: {{{mapping_str}}}"
-                   )
-           signal_summary = "\n".join(signal_lines) if signal_lines else "No significant product signals detected."
-           annualization = round(12 / period_months, 2) if period_months else 1.0
-           sector = state.get('sector', 'General')
-           prompt = (
-               f"⏱️ DATA PERIOD: {donem_label} ({period_days} days). "
-               f"Annualization factor: {annualization}x\n\n"
-               f"Analyze the banking product signals for **{state.get('company_name', 'Company')}** "
-               f"(Sector: **{sector}**).\n\n"
-               f"## SECTOR-AWARE PRODUCT PRIORITIZATION\n"
-               f"The company operates in the **{sector}** sector. Prioritize product suggestions "
-               f"relevant to this sector.\n\n"
-               f"## ACTIVE PRODUCT SIGNALS (ALL 5 COLUMNS):\n"
-               f"{signal_summary}\n\n"
-               f"## DETAILED PRODUCT BREAKDOWN:\n"
-               f"### 1. LOANS (300+400): ST=₺{loan_300['balance']:,.0f}, LT=₺{loan_400['balance']:,.0f}, FinExp=₺{financial_expenses['balance']:,.0f}\n"
-               f"### 2. POS: Collection(108)=₺{pos_collection['volume']:,.0f}, Expenses=₺{pos_expenses['balance']:,.0f}\n"
-               f"### 3. DBS: Bal=₺{dbs_usage['balance']:,.0f}, Vol=₺{dbs_usage['volume']:,.0f}\n"
-               f"### 4. SCF/TFS: Bal=₺{tfs_usage['balance']:,.0f}, Vol=₺{tfs_usage['volume']:,.0f}\n"
-               f"### 5. CORP CARD: Bal=₺{corporate_credit_card['balance']:,.0f}, Vol=₺{corporate_credit_card['volume']:,.0f}\n"
-               f"### 6. FLEET/INSURANCE: Assets=₺{vehicle_fleet_assets['balance']:,.0f}, Insurance=₺{insurance_expenses['balance']:,.0f}\n"
-               f"### 7. CHECKS: Recv(101)=₺{received_checks['balance']:,.0f}/₺{received_checks['volume']:,.0f}, Issued(103)=₺{issued_checks['balance']:,.0f}/₺{issued_checks['volume']:,.0f}\n"
-               f"### 8. TRADE FINANCE: Export(601)=₺{export_revenue['volume']:,.0f}, Expenses=₺{trade_finance_expenses['balance']:,.0f}\n"
-               f"### 9. FX/SWIFT: Net=₺{fx_volume['balance']:,.0f}, Activity=₺{fx_volume['volume']:,.0f}, SWIFT=₺{swift_transfer_expenses['balance']:,.0f}\n"
-               f"### 10. PAYROLL: Vol=₺{payroll_personnel_volume['volume']:,.0f}\n"
-               f"### 11. SECTORAL: Construction=₺{construction_costs['balance']:,.0f}, Machinery=₺{machinery_equipment['balance']:,.0f}, CommGoods=₺{commercial_goods['balance']:,.0f}\n\n"
-               f"## OUTPUT FORMAT INSTRUCTIONS:\n"
-               f"Structure your output into EXACTLY these sections:\n\n"
-               f"### SECTION 1: HIGH-PRIORITY SIGNALS (sorted by revenue potential)\n"
-               f"For each product category with non-zero signals, use this EXACT format:\n\n"
-               f"#### [Product Name] — Revenue Potential: [HIGH/MEDIUM/LOW]\n"
-               f"- **IF**: [State the data condition that triggered the signal]\n"
-               f"- **THINKING**: [Sector-aware interpretation — why this matters for {sector}]\n"
-               f"- **DATA**: Debit=₺X, Credit=₺X, BalDebit=₺X, BalCredit=₺X, Net=₺X, Volume=₺X\n"
-               f"- **ACCOUNTS**: [List exact sub-account codes from mapping — DO NOT invent]\n"
-               f"- **PROPOSAL**: [Specific ING Bank Turkey product] → Estimated annual revenue: ₺X\n\n"
-               f"### SECTION 2: CROSS-SELL GAPS\n"
-               f"List products with ZERO signals where ING can create new opportunities.\n"
-               f"Format: - [Product] → ING Opportunity: [description]\n\n"
-               f"### SECTION 3: REVENUE SUMMARY TABLE\n"
-               f"| Product | Current Volume | ING Product | Est. Annual Revenue | Priority |\n"
-               f"|---------|---------------|-------------|--------------------|---------|\n"
-               f"[Fill with data from Section 1]\n\n"
-               f"CRITICAL RULES:\n"
-               f"- Only reference accounts explicitly provided. DO NOT invent sub-account codes.\n"
-               f"- Sort HIGH-PRIORITY signals by estimated revenue (highest first).\n"
-               f"- Use annualization factor {annualization}x for sub-annual periods.\n\n"
-               + FEW_SHOT_PROMPT_ADDITION
-           )
-           llm_text = invoke_llm(PRODUCT_ANALYST_SYSTEM_PROMPT, prompt, temperature=0.2, max_tokens=3000)
-           self.metrics.record_llm_call(tokens=len(llm_text.split()))
-           logger.info(f"✅ Product analyst LLM interpretation: {len(llm_text)} chars")
-       except Exception as e:
-           logger.warning(f"LLM skipped: {e}")
-           llm_text = "LLM interpretation unavailable."
-       product_signals["llm_interpretation"] = llm_text
-       return {"product_signals": product_signals, "retry_count": retry_count + 1}
+       #try:
+       signal_lines = []
+       for name, data in product_signals.items():
+            if isinstance(data, dict) and (data.get("balance_credit", 0) != 0 or data.get("balance_debit", 0) != 0 or 
+                                           data.get("credit", 0) != 0 or data.get("debit", 0) != 0):
+                mapping_str = ", ".join(f"'{c} - {n}'" for c, n in data.get("account_mapping", {}).items())
+                signal_lines.append(
+                    f"- **{name}**" #: Balance=₺{data.get('balance', 0):,.0f}, Volume=₺{data.get('volume', 0):,.0f}, Accounts: {{{mapping_str}}}"
+                )
  
+       signal_summary = "\n".join(signal_lines) if signal_lines else "No significant product signals detected."
+       annualization = round(12 / period_months, 2) if period_months else 1.0
+       sector = state.get('sector', 'General')
+       prompt = (
+           f"⏱️ DATA PERIOD: {donem_label} ({period_days} days). "
+           f"Annualization factor: {annualization}x\n\n"
+           f"Analyze the banking product signals for **{state.get('company_name', 'Company')}** "
+           f"(Sector: **{sector}**).\n\n"
+           f"## SECTOR-AWARE PRODUCT PRIORITIZATION\n"
+           f"The company operates in the **{sector}** sector. Prioritize product suggestions "
+           f"relevant to this sector.\n\n"
+           f"## ACTIVE PRODUCT SIGNALS:\n"
+           f"{signal_summary}\n\n"
+           "## DETAILED PRODUCT BREAKDOWN:\n"
+           f"### 1. LOAN PRODUCTS (300 + 400 - Bank Loans):\n"
+           f"- Short-Term Loans (300 - Bank Loans): Credit Balance=₺{loan_300['balance_credit']:,.0f}, Debit Balance=₺{loan_300['balance_debit']:,.0f}, Credit Volume=₺{loan_300['credit']:,.0f}, Debit Volume=₺{loan_300['debit']:,.0f}, Account Mapping={get_account_mapping(loan_300)}\n"
+           f"- Long-Term Loans (400 - Bank Loans): Credit Balance=₺{loan_400['balance_credit']:,.0f}, Debit Balance=₺{loan_400['balance_debit']:,.0f}, Credit Volume=₺{loan_400['credit']:,.0f}, Debit Volume=₺{loan_400['debit']:,.0f}, Account Mapping={get_account_mapping(loan_400)}\n"
+           f"- Total Financial Expenses (780 - Financial Expenses): Credit Balance=₺{financial_expenses['balance_credit']:,.0f}, Debit Balance=₺{financial_expenses['balance_debit']:,.0f}, Credit    Volume=₺{financial_expenses['credit']:,.0f}, Debit Volume=₺{financial_expenses['debit']:,.0f}, Account Mapping={get_account_mapping(financial_expenses)}\n\n"
+           f"### 2. POS / VIRTUAL POS:\n"
+           f"- POS Collection (108 - Other Liquid Assets): Credit Balance=₺{pos_collection['balance_credit']:,.0f}, Debit Balance=₺{pos_collection['balance_debit']:,.0f}, Credit Volume=₺   {pos_collection['credit']:,.0f}, Debit Volume=₺{pos_collection['debit']:,.0f}, Account Mapping={get_account_mapping(pos_collection)}\n"
+           f"- POS/VPOS Expenses (760/780 - Expenses): Credit Balance=₺{pos_expenses['balance_credit']:,.0f}, Debit Balance=₺{pos_expenses['balance_debit']:,.0f}, Credit Volume=₺   {pos_expenses['credit']:,.0f}, Debit Volume=₺{pos_expenses['debit']:,.0f}, Account Mapping={get_account_mapping(pos_expenses)}\n\n"
+           f"### 3. DBS (Direct Debit System):\n"
+           f"- Usage Signal (120/320/300): Credit Balance=₺{dbs_usage['balance_credit']:,.0f}, Debit Balance=₺{dbs_usage['balance_debit']:,.0f}, Credit Volume=₺{dbs_usage['credit']:,.0f}, Debit Volume=₺{dbs_usage['debit']:,.0f}, Account Mapping={get_account_mapping(dbs_usage)}\n\n"
+           f"### 4. SUPPLIER FINANCE (TFS/SCF):\n"
+           f"- Usage Signal (320/300): Credit Balance=₺{tfs_usage['balance_credit']:,.0f}, Debit Balance=₺{tfs_usage['balance_debit']:,.0f}, Credit Volume=₺{tfs_usage['credit']:,.0f}, Debit Volume=₺   {tfs_usage['debit']:,.0f}, Account Mapping={get_account_mapping(tfs_usage)}\n\n"
+           f"### 5. CORPORATE CREDIT CARD:\n"
+           f"- Usage Signal (309/336): Credit Balance=₺{corporate_credit_card['balance_credit']:,.0f}, Debit Balance=₺{corporate_credit_card['balance_debit']:,.0f}, Credit Volume=₺   {corporate_credit_card['credit']:,.0f}, Debit Volume=₺{corporate_credit_card['debit']:,.0f}, Account Mapping={get_account_mapping(corporate_credit_card)}\n\n"
+           f"### 6. VEHICLE FLEET & INSURANCE:\n"
+           f"- Fleet Assets (254 - Vehicles): Credit Balance=₺{vehicle_fleet_assets['balance_credit']:,.0f}, Debit Balance=₺{vehicle_fleet_assets['balance_debit']:,.0f}, Credit Volume=₺   {vehicle_fleet_assets['credit']:,.0f}, Debit Volume=₺{vehicle_fleet_assets['debit']:,.0f}, Account Mapping={get_account_mapping(vehicle_fleet_assets)}\n"
+           f"- Insurance Expenses (730/760/770): Credit Balance=₺{insurance_expenses['balance_credit']:,.0f}, Debit Balance=₺{insurance_expenses['balance_debit']:,.0f}, Credit Volume=₺   {insurance_expenses['credit']:,.0f}, Debit Volume=₺{insurance_expenses['debit']:,.0f}, Account Mapping={get_account_mapping(insurance_expenses)}\n\n"
+           f"### 7. CHECK PRODUCTS:\n"
+           f"- Received Checks (101 - Received Checks): Credit Balance=₺{received_checks['balance_credit']:,.0f}, Debit Balance=₺{received_checks['balance_debit']:,.0f}, Credit Volume=₺   {received_checks['credit']:,.0f}, Debit Volume=₺{received_checks['debit']:,.0f}, Account Mapping={get_account_mapping(received_checks)}\n"
+           f"- Issued Checks (103 - Given Checks): Credit Balance=₺{issued_checks['balance_credit']:,.0f}, Debit Balance=₺{issued_checks['balance_debit']:,.0f}, Credit Volume=₺   {issued_checks['credit']:,.0f}, Debit Volume=₺{issued_checks['debit']:,.0f}, Account Mapping={get_account_mapping(issued_checks)}\n\n"
+           f"### 8. TRADE FINANCE & LETTER OF CREDIT:\n"
+           f"- Export Revenue (601 - Export Sales): Credit Balance=₺{export_revenue['balance_credit']:,.0f}, Debit Balance=₺{export_revenue['balance_debit']:,.0f}, Credit Volume=₺   {export_revenue['credit']:,.0f}, Debit Volume=₺{export_revenue['debit']:,.0f}, Account Mapping={get_account_mapping(export_revenue)} \n"
+           f"- Trade Finance Related Expenses (159/340): Credit Balance=₺{trade_finance_expenses['balance_credit']:,.0f}, Debit Balance=₺{trade_finance_expenses['balance_debit']:,.0f}, Credit Volume=₺{trade_finance_expenses['credit']:,.0f}, Debit Volume=₺{trade_finance_expenses['debit']:,.0f}, Account Mapping={get_account_mapping(trade_finance_expenses)} \n\n"
+           f"### 9. FX & INTERNATIONAL TRANSFERS:\n"
+           f"- FX Net Impact (646/656): Credit Balance=₺{fx_volume['balance_credit']:,.0f}, Debit Balance=₺{fx_volume['balance_debit']:,.0f}, Credit Volume=₺{fx_volume['credit']:,.0f}, Debit Volume=₺{fx_volume['debit']:,.0f}, Account Mapping={get_account_mapping(fx_volume)}\n"
+           f"- SWIFT/Transfer Expenses: Credit Balance=₺{swift_transfer_expenses['balance_credit']:,.0f}, Debit Balance=₺{swift_transfer_expenses['balance_debit']:,.0f}, Credit Volume=₺   {swift_transfer_expenses['credit']:,.0f}, Debit Volume=₺{swift_transfer_expenses['debit']:,.0f}, Account Mapping={get_account_mapping(swift_transfer_expenses)}\n\n"
+           f"### 10. PAYROLL & PERSONNEL:\n"
+           f"- Total Payroll Volume (720/730/760/770 - Labor/Personnel): Credit Balance=₺{payroll_personnel_volume['balance_credit']:,.0f}, Debit Balance=₺   {payroll_personnel_volume['balance_debit']:,.0f}, Credit Volume=₺{payroll_personnel_volume['credit']:,.0f}, Debit Volume=₺{payroll_personnel_volume['debit']:,.0f}, Account Mapping={get_account_mapping(payroll_personnel_volume)}\n\n"
+           f"### 11. SECTORAL INDICATORS:\n"
+           f"- Construction Costs (170 - Construction Costs): Credit Balance=₺{construction_costs['balance_credit']:,.0f}, Debit Balance=₺{construction_costs['balance_debit']:,.0f}, Credit Volume=₺   {construction_costs['credit']:,.0f}, Debit Volume=₺{construction_costs['debit']:,.0f}, Account Mapping={get_account_mapping(construction_costs)}\n"
+           f"- Progress Billings (350 - Progress Billings): Credit Balance=₺{progress_billings['balance_credit']:,.0f}, Debit Balance=₺{progress_billings['balance_debit']:,.0f}, Credit Volume=₺   {progress_billings['credit']:,.0f}, Debit Volume=₺{progress_billings['debit']:,.0f}, Account Mapping={get_account_mapping(progress_billings)}\n"
+           f"- Machinery & Equipment (253 - Machinery & Equipment): Credit Balance=₺{machinery_equipment['balance_credit']:,.0f}, Debit Balance=₺{machinery_equipment['balance_debit']:,.0f}, Credit    Volume=₺{machinery_equipment['credit']:,.0f}, Debit Volume=₺{machinery_equipment['debit']:,.0f}, Account Mapping={get_account_mapping(machinery_equipment)}\n"
+           f"- Commercial Goods (153 - Commercial Goods): Credit Balance=₺{commercial_goods['balance_credit']:,.0f}, Debit Balance=₺{commercial_goods['balance_debit']:,.0f}, Credit Volume=₺   {commercial_goods['credit']:,.0f}, Debit Volume=₺{commercial_goods['debit']:,.0f}, Account Mapping={get_account_mapping(commercial_goods)}\n"
+           f"- Manufacturing Overhead (730 - Manufacturing Overhead): Credit Balance=₺{manufacturing_overhead['balance_credit']:,.0f}, Debit Balance=₺{manufacturing_overhead['balance_debit']:,.0f},    Credit Volume=₺{manufacturing_overhead['credit']:,.0f}, Debit Volume=₺{manufacturing_overhead['debit']:,.0f}, Account Mapping={get_account_mapping(manufacturing_overhead)}\n\n"
+           f"### 12. FACTORING / LEASING / GUARANTEES / CASH MGMT / E-COMMERCE:\n"
+           f"- Notes Receivable (121 - Alacak Senetleri): Debit Balance=₺{notes_receivable['balance_debit']:,.0f}, Debit Volume=₺{notes_receivable['debit']:,.0f}, Account Mapping={get_account_mapping(notes_receivable)}\n"
+           f"- Leasing Payables (301/401 - Finansal Kiralama Borçları): Credit Balance=₺{leasing_payables['balance_credit']:,.0f}, Credit Volume=₺{leasing_payables['credit']:,.0f}, Account Mapping={get_account_mapping(leasing_payables)}\n"
+           f"- Guarantee Letter Commissions (760/770/780 - TEMİNAT): Debit Balance=₺{guarantee_commissions['balance_debit']:,.0f}, Debit Volume=₺{guarantee_commissions['debit']:,.0f}, Account Mapping={get_account_mapping(guarantee_commissions)}\n"
+           f"- Bank Transaction Volume (102 - Bankalar): Debit Balance=₺{bank_transaction_volume['balance_debit']:,.0f}, Debit Volume=₺{bank_transaction_volume['debit']:,.0f}, Account Mapping={get_account_mapping(bank_transaction_volume)}\n"
+           f"- E-Commerce Revenue (600/649 - E-TİCARET/ONLINE/PAZARYERİ): Credit Balance=₺{ecommerce_revenue['balance_credit']:,.0f}, Credit Volume=₺{ecommerce_revenue['credit']:,.0f}, Account Mapping={get_account_mapping(ecommerce_revenue)}\n\n"
+
+           f"## OUTPUT FORMAT INSTRUCTIONS:\n"
+           f"Structure your output into EXACTLY these sections:\n\n"
+           f"### SECTION 1: HIGH-PRIORITY SIGNALS (sorted by revenue potential)\n"
+           f"For each product category with non-zero signals, use this EXACT format:\n\n"
+           f"#### [Product Name] — Revenue Potential: [HIGH/MEDIUM/LOW]\n"
+           f"- **IF**: [State the data condition that triggered the signal]\n"
+           f"- **THINKING**: [Sector-aware interpretation — why this matters for {sector}]\n"
+           f"- **DATA**: Debit=₺X, Credit=₺X, BalDebit=₺X, BalCredit=₺X, Net=₺X, Volume=₺X\n"
+           f"- **ACCOUNTS**: [List exact sub-account codes from account mapping with **volume information** — DO NOT invent]\n"
+           f"- **PROPOSAL**: [Specific ING Bank Turkey product] → Estimated annual revenue: ₺X - Use backed data(i.e. Credit card spending volume for Corporate Credit Card) for estimation.\n\n"
+           f"### SECTION 2: CROSS-SELL GAPS\n"
+           f"a. List products with ZERO signals where ING can create new opportunities.\n"
+           f"b. List products with volume where ING can sell new products together with current products.\n"
+           f"Format: - [Product] → ING Opportunity: [description]\n\n"
+           f"### SECTION 3: REVENUE SUMMARY TABLE\n"
+           f"You MUST explicitly include EVERY single product opportunity mentioned in Section 1 AND Section 2 in this table. Do not omit, group, or summarize any items. If an item is listed in Section 1 or Section 2, it MUST have its own row here.\n\n"
+          #f"| Product Area/Need | Signal Type (Active/Cross-Sell) | Current Volume / Status | Proposed ING Product | Est. Annual Revenue | Priority |\n"
+          #f"|-------------------|---------------------------------|-------------------------|----------------------|---------------------|----------|\n"
+          #f"[Insert a row for EVERY active signal from Section 1]\n"
+          #f"[Insert a row for EVERY cross-sell gap from Section 2]\n\n"
+           #f"</output_instructions>\n\n"
+           f"| Product | Current Volume | ING Product | Est. Annual Revenue | Priority |\n"
+           f"|---------|---------------|-------------|--------------------|---------|\n"
+           f"[Fill with data from Section 1 and Section 2, include ALL.]\n\n"
+ 
+           #f"<critical_guardrails>\n"
+           f"CRITICAL RULES:\n"
+           f"1. PERSONA ENFORCEMENT: Tailor all insights through the lens of a corporate banker specializing in the {sector} sector.\n"
+           f"2. ZERO HALLLUCINATIONS: Only reference sub-account codes explicitly listed in the account mapping dictionaries. If no code is present, omit it.\n"
+           f"3. REVENUE SORTING: Order items in Section 1 strictly by the calculated annualized revenue potential from highest to lowest.\n"
+           f"4. TOTAL ALIGNMENT CONSTRAINT: Before printing Section 3, verify that the total number of table rows equals exactly (Total Section 1 entries + Total Section 2 entries). Every identified product must be accounted for.\n"
+           f"5. CURRENT USAGE EXCLUSION: Products listed under 'CURRENTLY USED PRODUCTS' (latest bank core data) MUST NOT appear as recommendations in ANY section or table — reference them only as existing relationship context.\n"
+           #f"</critical_guardrails>\n"
+           #f"CRITICAL RULES:\n"
+           #f"- Only reference accounts explicitly provided. DO NOT invent sub-account codes.\n"
+           #f"- Sort HIGH-PRIORITY signals by estimated revenue (highest first).\n"
+           #f"- Use annualization factor {annualization}x for sub-annual periods.\n\n"
+           #f"- TABLE COMPLETENESS STRICT RULE: The Section 3 table must be a 1:1 match with Sections 1 and 2. Count your proposals before writing the table to ensure absolutely no product is left out."
+        )
+
+       # ── SELECTIVE FEW-SHOT INJECTION (token-efficient) ──
+       # Only scenarios whose product signals exist in this Mizan are injected.
+       # Products already used per the local bank DB (db_product_flags == 1)
+       # are excluded from recommendations and listed as current usage.
+       db_product_flags = state.get("db_product_flags") or {}
+       db_metrics = state.get("db_financial_metrics") or {}
+       classification = classify_product_opportunities(
+           product_signals, sector=sector, product_flags=db_product_flags
+       )
+       injection = build_few_shot_injection(classification, sector=sector)
+       if db_metrics:
+           db_meta = state.get("db_meta") or {}
+           metric_line = ", ".join(f"{k}={v:,.2f}" for k, v in db_metrics.items())
+           prompt += (
+               f"\n\n## LOCAL DB REFERENCE METRICS (bank core system, "
+               f"period {db_meta.get('financial_period', '?')} — LATEST DATA):\n"
+               f"{metric_line}\n"
+               f"Use these as the authoritative latest view when sizing opportunities."
+           )
+       prompt += injection["user_addition"]
+       system_prompt = PRODUCT_ANALYST_SYSTEM_PROMPT + injection["system_addition"]
+
+       print("product_analyst_prompt: ", prompt)
+       llm_text = invoke_llm(system_prompt, prompt, temperature=0.2, max_tokens=3000)
+       self.metrics.record_llm_call(tokens=len(llm_text.split()))
+       logger.info(f"✅ Product analyst LLM interpretation: {len(llm_text)} chars")
+       #except Exception as e:
+       #    logger.warning(f"LLM skipped: {e}")
+       #    llm_text = "LLM interpretation unavailable."
+       summary_rows = []
+       detail_rows = []
+       for product_name, metrics in product_signals.items():
+           summary_rows.append({
+               "product_name": product_name,
+               "balance_debit": int(metrics.get("balance_debit", 0)),
+               "balance_credit": int(metrics.get("balance_credit", 0)),
+               "debit": int(metrics.get("debit", 0)),
+               "credit": int(metrics.get("credit", 0)),
+               "matched_account_count": len(metrics.get("account_mapping", {}))
+           })
+           for account_info, volume_info in metrics.get("account_mapping", {}).items():
+               detail_rows.append({
+                   "product_name": product_name,
+                   "account_info": account_info,
+                   "volume_info": float(volume_info.replace("volume: ", "").strip())
+               })
+       summary_df = pd.DataFrame(summary_rows)
+       reference_df = pd.DataFrame(detail_rows)
+       def format_tl(x):
+           return f"{x:,.0f}"
+       for col in ["balance_debit", "balance_credit", "debit", "credit"]:
+           summary_df[col] = summary_df[col].apply(format_tl)
+       for col in ["volume_info"]:
+           reference_df[col] = reference_df[col].apply(format_tl)
+       product_signals["llm_interpretation"] = llm_text
+       product_signals["summary_df"]=summary_df
+       product_signals["reference_df"]=reference_df
+       # Classification result (selected/excluded products) for downstream agents
+       product_signals["recommendation_classification"] = {
+           "selected_keys": classification["selected_keys"],
+           "excluded_existing": classification["excluded_existing"],
+           "inactive_keys": classification["inactive_keys"],
+       }
+       # DETERMINISTIC recommendation catalog: fixes the strategist matrix
+       # membership (all active signals + sector cross-sell gaps), so the
+       # row count no longer varies run over run.
+       product_signals["recommendation_catalog"] = build_recommendation_catalog(
+           product_signals, sector=sector, product_flags=db_product_flags
+       )
+       return {"product_signals": product_signals, "retry_count": retry_count + 1}
 # Module-level callable for LangGraph
 product_analyst_agent = ProductAnalystAgent()
