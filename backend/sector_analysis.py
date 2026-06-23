@@ -19,6 +19,7 @@ Responsibilities:
 
 import json
 import logging
+import os
 import re
 import unicodedata
 from pathlib import Path
@@ -27,6 +28,31 @@ logger = logging.getLogger("swarm.sector_analysis")
 
 BENCHMARKS_PATH = Path(__file__).parent / "data" / "tcmb_sector_benchmarks.json"
 NACE_MAPPING_PATH = Path(__file__).parent / "data" / "nace_sector_mapping.json"
+
+
+def is_sector_analysis_enabled() -> bool:
+    """
+    Whether the TCMB sector-benchmark comparison should be injected into the
+    strategist report. OPTIONAL by design: the benchmark JSON holds indicative
+    placeholders that may be stale, and a comparison against out-of-date
+    sector figures can mislead the RM. Controlled by ENABLE_SECTOR_ANALYSIS:
+
+      - unset / "auto" (default): ENABLED only when the benchmark dataset is
+        marked fresh (metadata.needs_refresh == false); DISABLED while the
+        data still carries placeholder values.
+      - "1"/"true"/"on": force ENABLED (use the data as-is, even if stale).
+      - "0"/"false"/"off": force DISABLED (skip sector analysis entirely).
+
+    Read per-call so deployments/tests switch via the environment.
+    """
+    flag = os.environ.get("ENABLE_SECTOR_ANALYSIS", "auto").strip().lower()
+    if flag in ("1", "true", "on", "yes", "enabled"):
+        return True
+    if flag in ("0", "false", "off", "no", "disabled"):
+        return False
+    # "auto": follow the freshness of the benchmark dataset
+    needs_refresh = load_benchmarks().get("metadata", {}).get("needs_refresh", True)
+    return not needs_refresh
 
 # Keyword → benchmark sector mapping. Sector strings come from an LLM
 # (predict_sector) so matching must tolerate EN/TR free text.
@@ -57,19 +83,52 @@ _MODIFIER_KEYWORDS = {
     "Import": ["import", "ithalat", "importer"],
 }
 
-# Maps benchmark metric → (quant_analyst ratio key, direction)
-# direction: "higher_better", "lower_better", "context" (no judgement)
+# Maps benchmark metric → company-value sources + judgement direction:
+#   (bench_key, quant_ratio_key, db_metric_en, unit, direction)
+# - quant_ratio_key: key in quant_analyst's financial_ratios (Mizan-derived,
+#   PRIMARY source — computed from the analyzed document itself)
+# - db_metric_en:   en_description in local_db's bank-core metrics
+#   (TR_EN_METRIC_MAP values) — FALLBACK source filling Mizan gaps
+# - direction: "higher_better", "lower_better", "context" (no judgement)
+#
+# DB-name alignment with local_db.TR_EN_METRIC_MAP (TR originals):
+#   Current Ratio ← 'Cari Oran'
+#   Acid-Test Ratio (Quick Ratio) ← 'Asit Test Oranı'
+#   Total Liabilities / Total Assets ← 'Toplam Yükümlülük / Toplam Aktif'
+#   Gross Profit Margin (%) ← 'Brüt Kar marjı (%)'
+#   Net Operating Profit (EBIT) Margin (%) ← 'Net Faaliyet (FVÖK) Karı (%)'
+#   Net Profit Margin (%) ← 'Net kar marjı (%)'
+#   Receivables Collection Period (Days) ← 'Alacak Devir Süresi (Gün)'
+#   Payables Period (Days) ← 'Borç Devir Süresi (Gün)'
+#   Inventory Period (Days) ← 'Stok Devir Süresi (Gün)'
+#   Total Financial Debt / Total Liabilities ← 'Toplam Finansal Borç / Toplam Yükümlülükler'
+# NOTE: debt_to_equity intentionally has NO DB binding — the DB only carries
+# 'Toplam Net Borç / Özkaynak' (NET debt / equity), a different definition
+# than the benchmark's total-liabilities-based debt-to-equity.
 _RATIO_BINDINGS = [
-    ("current_ratio", "current_ratio", "x", "higher_better"),
-    ("acid_test_ratio", "quick_ratio", "x", "higher_better"),
-    ("debt_to_equity", "debt_to_equity", "x", "lower_better"),
-    ("gross_margin_pct", "gross_margin", "%", "higher_better"),
-    ("operating_margin_pct", "operating_margin", "%", "higher_better"),
-    ("collection_period_days", "collection_period", "days", "lower_better"),
-    ("payment_period_days", "payment_period", "days", "context"),
-    ("inventory_period_days", "inventory_period", "days", "lower_better"),
-    ("bank_loans_to_liabilities_pct", "bank_debt_ratio", "%", "context"),
+    ("current_ratio", "current_ratio", "Current Ratio", "x", "higher_better"),
+    ("acid_test_ratio", "quick_ratio", "Acid-Test Ratio (Quick Ratio)", "x", "higher_better"),
+    ("debt_to_equity", "debt_to_equity", None, "x", "lower_better"),
+    ("leverage_ratio_pct", None, "Total Liabilities / Total Assets", "%", "lower_better"),
+    ("gross_margin_pct", "gross_margin", "Gross Profit Margin (%)", "%", "higher_better"),
+    ("operating_margin_pct", "operating_margin", "Net Operating Profit (EBIT) Margin (%)", "%", "higher_better"),
+    ("net_margin_pct", None, "Net Profit Margin (%)", "%", "higher_better"),
+    ("collection_period_days", "collection_period", "Receivables Collection Period (Days)", "days", "lower_better"),
+    ("payment_period_days", "payment_period", "Payables Period (Days)", "days", "context"),
+    ("inventory_period_days", "inventory_period", "Inventory Period (Days)", "days", "lower_better"),
+    ("bank_loans_to_liabilities_pct", "bank_debt_ratio", "Total Financial Debt / Total Liabilities", "%", "context"),
 ]
+
+
+# EDW storage convention (CONFIRMED): DB metrics WITHOUT a '(%)' suffix
+# that map to %-based TCMB benchmarks are stored as plain ratios
+# (e.g. 'Toplam Yükümlülük / Toplam Aktif' = 0.72) → fixed ×100 conversion.
+# '(%)'-suffixed metrics (Gross/EBIT/Net margins) are stored as percents
+# already and need no scaling.
+_DB_METRIC_SCALE = {
+    "Total Liabilities / Total Assets": 100.0,
+    "Total Financial Debt / Total Liabilities": 100.0,
+}
 
 _benchmarks_cache = None
 
@@ -245,36 +304,78 @@ def get_sector_benchmark(sector: str, already_matched: bool = False) -> dict:
     return benchmark
 
 
-def compare_company_to_sector(financial_ratios: dict, sector: str) -> dict:
+def compare_company_to_sector(financial_ratios: dict, sector: str,
+                              db_metrics: dict = None) -> dict:
     """
-    Compare quant_analyst ratios against the matched TCMB sector benchmark.
+    Compare company metrics against the matched TCMB sector benchmark.
+
+    Company values are resolved per binding with this priority:
+      1. quant_analyst's Mizan-derived ratio (source "mizan") — computed
+         from the analyzed document, so it wins when both exist;
+      2. the bank-core DB metric from local_db (source "bank_db",
+         English en_description keys) — fills gaps the Mizan can't
+         provide (net margin, leverage ratio, ...).
 
     Returns:
       {
+        "enabled": bool,                   # False → sector analysis turned off
         "matched_sector": str,
         "secondary_sectors": [str, ...],   # multi-sector predictions
         "modifiers": [str, ...],           # Export / Import flags
         "is_fallback": bool,               # sector prediction absent/unmatched
-        "rows": [{metric, company, sector, unit, deviation_pct, assessment}],
+        "rows": [{metric, company, sector, unit, deviation_pct,
+                  assessment, source}],
         "banking_notes": str,
-        "markdown": str   # ready-to-inject prompt section
+        "markdown": str   # ready-to-inject prompt section ("" when disabled)
       }
+
+    When sector analysis is disabled (see is_sector_analysis_enabled), this
+    returns an inert result with enabled=False and empty markdown so the
+    strategist simply omits the benchmark section.
     """
+    if not is_sector_analysis_enabled():
+        logger.info(
+            "[Benchmark] Sector analysis DISABLED (ENABLE_SECTOR_ANALYSIS / stale "
+            "benchmark data) — skipping TCMB comparison in the report"
+        )
+        return {
+            "enabled": False, "matched_sector": None, "secondary_sectors": [],
+            "modifiers": [], "is_fallback": True, "rows": [],
+            "banking_notes": "", "markdown": "",
+        }
+
     match_info = match_sectors(sector)
     benchmark = get_sector_benchmark(match_info["primary"], already_matched=True)
     matched = benchmark.get("matched_sector", "General")
+    db_metrics = db_metrics or {}
     rows = []
 
-    for bench_key, ratio_key, unit, direction in _RATIO_BINDINGS:
+    for bench_key, ratio_key, db_metric_en, unit, direction in _RATIO_BINDINGS:
         bench_val = benchmark.get(bench_key)
-        company_val = (financial_ratios or {}).get(ratio_key, {}).get("value")
-        if bench_val is None or company_val is None:
+        if bench_val is None:
             continue
+
+        # 1. Mizan-derived ratio (primary), 2. bank DB metric (fallback)
+        company_val = None
+        source = None
+        if ratio_key:
+            company_val = (financial_ratios or {}).get(ratio_key, {}).get("value")
+            if company_val is not None:
+                source = "mizan"
+        if company_val is None and db_metric_en and db_metric_en in db_metrics:
+            company_val = db_metrics[db_metric_en]
+            source = "bank_db"
+        if company_val is None:
+            continue
+
         try:
             company_val = float(company_val)
             bench_val = float(bench_val)
         except (TypeError, ValueError):
             continue
+        if source == "bank_db":
+            company_val *= _DB_METRIC_SCALE.get(db_metric_en, 1.0)
+
         deviation_pct = ((company_val - bench_val) / bench_val * 100) if bench_val else 0.0
 
         if direction == "context":
@@ -286,24 +387,29 @@ def compare_company_to_sector(financial_ratios: dict, sector: str) -> dict:
             assessment = "better than sector" if better else "worse than sector"
 
         rows.append({
-            "metric": ratio_key,
+            # Label by the source actually used, so the table never shows a
+            # Mizan ratio name for a value that came from the bank DB
+            "metric": db_metric_en if source == "bank_db" else ratio_key,
             "company": round(company_val, 2),
             "sector": round(bench_val, 2),
             "unit": unit,
             "deviation_pct": round(deviation_pct, 1),
             "assessment": assessment,
+            "source": source,
         })
 
     # ── Markdown rendering for LLM prompt injection ──
     if rows:
         table_lines = [
-            "| Metric | Company | Sector Benchmark | Deviation | Assessment |",
-            "|--------|---------|------------------|-----------|------------|",
+            "| Metric | Company | Sector Benchmark | Deviation | Assessment | Source |",
+            "|--------|---------|------------------|-----------|------------|--------|",
         ]
         for r in rows:
+            source_label = "Mizan" if r["source"] == "mizan" else "Bank DB (latest)"
             table_lines.append(
                 f"| {r['metric']} | {r['company']}{r['unit']} | "
-                f"{r['sector']}{r['unit']} | {r['deviation_pct']:+.1f}% | {r['assessment']} |"
+                f"{r['sector']}{r['unit']} | {r['deviation_pct']:+.1f}% | "
+                f"{r['assessment']} | {source_label} |"
             )
         table_md = "\n".join(table_lines)
     else:
@@ -342,6 +448,7 @@ def compare_company_to_sector(financial_ratios: dict, sector: str) -> dict:
     )
 
     return {
+        "enabled": True,
         "matched_sector": matched,
         "secondary_sectors": match_info["secondary"],
         "modifiers": match_info["modifiers"],

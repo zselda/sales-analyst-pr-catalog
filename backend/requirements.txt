@@ -12,3 +12,7 @@ pytest>=8.0.0
 reportlab>=4.0.0
 python-multipart>=0.0.9
 openpyxl>=3.1.0
+# Oracle EDW backend (CUSTOMER_DB_BACKEND=oracle); requires Oracle Instant
+# Client libraries on the host for oracledb.init_oracle_client()
+sqlalchemy>=2.0.0
+oracledb>=2.0.0

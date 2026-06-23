@@ -26,6 +26,7 @@ from agents.few_shot_library import (
     build_few_shot_injection,
     build_recommendation_catalog,
 )
+from agents.product_catalog import build_catalog_injection
 logger = logging.getLogger("swarm.agents.product_analyst")
  
 # Few-shot scenarios and the product classification/selection logic now
@@ -380,6 +381,85 @@ class ProductAnalystAgent(BaseAgent):
        signal_summary = "\n".join(signal_lines) if signal_lines else "No significant product signals detected."
        annualization = round(12 / period_months, 2) if period_months else 1.0
        sector = state.get('sector', 'General')
+
+       # ── DETAILED PRODUCT BREAKDOWN (token-optimized) ──
+       # Active lines (non-zero signal) keep the full 5-column detail.
+       # Zero-signal lines collapse to a single "no signal" line so they
+       # still feed SECTION 2 (cross-sell gaps) without wasting ~1.8K tokens
+       # of all-zero columns.
+       def _has_signal(m: dict) -> bool:
+           return any(abs(float(m.get(k, 0) or 0)) > 0 for k in
+                      ("balance", "volume", "credit", "debit",
+                       "balance_credit", "balance_debit"))
+
+       def _fmt_breakdown_line(label: str, m: dict) -> str:
+           if _has_signal(m):
+               return (f"- {label}: Credit Balance=₺{m['balance_credit']:,.0f}, "
+                       f"Debit Balance=₺{m['balance_debit']:,.0f}, "
+                       f"Credit Volume=₺{m['credit']:,.0f}, "
+                       f"Debit Volume=₺{m['debit']:,.0f}, "
+                       f"Account Mapping={get_account_mapping(m)}")
+           return f"- {label}: no signal (potential cross-sell gap)"
+
+       breakdown_spec = [
+           ("1. LOAN PRODUCTS (300 + 400 - Bank Loans)", [
+               ("Short-Term Loans (300 - Bank Loans)", loan_300),
+               ("Long-Term Loans (400 - Bank Loans)", loan_400),
+               ("Total Financial Expenses (780 - Financial Expenses)", financial_expenses),
+           ]),
+           ("2. POS / VIRTUAL POS", [
+               ("POS Collection (108 - Other Liquid Assets)", pos_collection),
+               ("POS/VPOS Expenses (760/780 - Expenses)", pos_expenses),
+           ]),
+           ("3. DBS (Direct Debit System)", [
+               ("Usage Signal (120/320/300)", dbs_usage),
+           ]),
+           ("4. SUPPLIER FINANCE (TFS/SCF)", [
+               ("Usage Signal (320/300)", tfs_usage),
+           ]),
+           ("5. CORPORATE CREDIT CARD", [
+               ("Usage Signal (309/336)", corporate_credit_card),
+           ]),
+           ("6. VEHICLE FLEET & INSURANCE", [
+               ("Fleet Assets (254 - Vehicles)", vehicle_fleet_assets),
+               ("Insurance Expenses (730/760/770)", insurance_expenses),
+           ]),
+           ("7. CHECK PRODUCTS", [
+               ("Received Checks (101 - Received Checks)", received_checks),
+               ("Issued Checks (103 - Given Checks)", issued_checks),
+           ]),
+           ("8. TRADE FINANCE & LETTER OF CREDIT", [
+               ("Export Revenue (601 - Export Sales)", export_revenue),
+               ("Trade Finance Related Expenses (159/340)", trade_finance_expenses),
+           ]),
+           ("9. FX & INTERNATIONAL TRANSFERS", [
+               ("FX Net Impact (646/656)", fx_volume),
+               ("SWIFT/Transfer Expenses", swift_transfer_expenses),
+           ]),
+           ("10. PAYROLL & PERSONNEL", [
+               ("Total Payroll Volume (720/730/760/770 - Labor/Personnel)", payroll_personnel_volume),
+           ]),
+           ("11. SECTORAL INDICATORS", [
+               ("Construction Costs (170 - Construction Costs)", construction_costs),
+               ("Progress Billings (350 - Progress Billings)", progress_billings),
+               ("Machinery & Equipment (253 - Machinery & Equipment)", machinery_equipment),
+               ("Commercial Goods (153 - Commercial Goods)", commercial_goods),
+               ("Manufacturing Overhead (730 - Manufacturing Overhead)", manufacturing_overhead),
+           ]),
+           ("12. FACTORING / LEASING / GUARANTEES / CASH MGMT / E-COMMERCE", [
+               ("Notes Receivable (121 - Alacak Senetleri)", notes_receivable),
+               ("Leasing Payables (301/401 - Finansal Kiralama Borçları)", leasing_payables),
+               ("Guarantee Letter Commissions (760/770/780 - TEMİNAT)", guarantee_commissions),
+               ("Bank Transaction Volume (102 - Bankalar)", bank_transaction_volume),
+               ("E-Commerce Revenue (600/649 - E-TİCARET/ONLINE/PAZARYERİ)", ecommerce_revenue),
+           ]),
+       ]
+       breakdown_lines = []
+       for header, items in breakdown_spec:
+           breakdown_lines.append(f"### {header}:")
+           breakdown_lines.extend(_fmt_breakdown_line(lbl, m) for lbl, m in items)
+           breakdown_lines.append("")
+       detailed_breakdown = "\n".join(breakdown_lines)
        prompt = (
            f"⏱️ DATA PERIOD: {donem_label} ({period_days} days). "
            f"Annualization factor: {annualization}x\n\n"
@@ -391,45 +471,9 @@ class ProductAnalystAgent(BaseAgent):
            f"## ACTIVE PRODUCT SIGNALS:\n"
            f"{signal_summary}\n\n"
            "## DETAILED PRODUCT BREAKDOWN:\n"
-           f"### 1. LOAN PRODUCTS (300 + 400 - Bank Loans):\n"
-           f"- Short-Term Loans (300 - Bank Loans): Credit Balance=₺{loan_300['balance_credit']:,.0f}, Debit Balance=₺{loan_300['balance_debit']:,.0f}, Credit Volume=₺{loan_300['credit']:,.0f}, Debit Volume=₺{loan_300['debit']:,.0f}, Account Mapping={get_account_mapping(loan_300)}\n"
-           f"- Long-Term Loans (400 - Bank Loans): Credit Balance=₺{loan_400['balance_credit']:,.0f}, Debit Balance=₺{loan_400['balance_debit']:,.0f}, Credit Volume=₺{loan_400['credit']:,.0f}, Debit Volume=₺{loan_400['debit']:,.0f}, Account Mapping={get_account_mapping(loan_400)}\n"
-           f"- Total Financial Expenses (780 - Financial Expenses): Credit Balance=₺{financial_expenses['balance_credit']:,.0f}, Debit Balance=₺{financial_expenses['balance_debit']:,.0f}, Credit    Volume=₺{financial_expenses['credit']:,.0f}, Debit Volume=₺{financial_expenses['debit']:,.0f}, Account Mapping={get_account_mapping(financial_expenses)}\n\n"
-           f"### 2. POS / VIRTUAL POS:\n"
-           f"- POS Collection (108 - Other Liquid Assets): Credit Balance=₺{pos_collection['balance_credit']:,.0f}, Debit Balance=₺{pos_collection['balance_debit']:,.0f}, Credit Volume=₺   {pos_collection['credit']:,.0f}, Debit Volume=₺{pos_collection['debit']:,.0f}, Account Mapping={get_account_mapping(pos_collection)}\n"
-           f"- POS/VPOS Expenses (760/780 - Expenses): Credit Balance=₺{pos_expenses['balance_credit']:,.0f}, Debit Balance=₺{pos_expenses['balance_debit']:,.0f}, Credit Volume=₺   {pos_expenses['credit']:,.0f}, Debit Volume=₺{pos_expenses['debit']:,.0f}, Account Mapping={get_account_mapping(pos_expenses)}\n\n"
-           f"### 3. DBS (Direct Debit System):\n"
-           f"- Usage Signal (120/320/300): Credit Balance=₺{dbs_usage['balance_credit']:,.0f}, Debit Balance=₺{dbs_usage['balance_debit']:,.0f}, Credit Volume=₺{dbs_usage['credit']:,.0f}, Debit Volume=₺{dbs_usage['debit']:,.0f}, Account Mapping={get_account_mapping(dbs_usage)}\n\n"
-           f"### 4. SUPPLIER FINANCE (TFS/SCF):\n"
-           f"- Usage Signal (320/300): Credit Balance=₺{tfs_usage['balance_credit']:,.0f}, Debit Balance=₺{tfs_usage['balance_debit']:,.0f}, Credit Volume=₺{tfs_usage['credit']:,.0f}, Debit Volume=₺   {tfs_usage['debit']:,.0f}, Account Mapping={get_account_mapping(tfs_usage)}\n\n"
-           f"### 5. CORPORATE CREDIT CARD:\n"
-           f"- Usage Signal (309/336): Credit Balance=₺{corporate_credit_card['balance_credit']:,.0f}, Debit Balance=₺{corporate_credit_card['balance_debit']:,.0f}, Credit Volume=₺   {corporate_credit_card['credit']:,.0f}, Debit Volume=₺{corporate_credit_card['debit']:,.0f}, Account Mapping={get_account_mapping(corporate_credit_card)}\n\n"
-           f"### 6. VEHICLE FLEET & INSURANCE:\n"
-           f"- Fleet Assets (254 - Vehicles): Credit Balance=₺{vehicle_fleet_assets['balance_credit']:,.0f}, Debit Balance=₺{vehicle_fleet_assets['balance_debit']:,.0f}, Credit Volume=₺   {vehicle_fleet_assets['credit']:,.0f}, Debit Volume=₺{vehicle_fleet_assets['debit']:,.0f}, Account Mapping={get_account_mapping(vehicle_fleet_assets)}\n"
-           f"- Insurance Expenses (730/760/770): Credit Balance=₺{insurance_expenses['balance_credit']:,.0f}, Debit Balance=₺{insurance_expenses['balance_debit']:,.0f}, Credit Volume=₺   {insurance_expenses['credit']:,.0f}, Debit Volume=₺{insurance_expenses['debit']:,.0f}, Account Mapping={get_account_mapping(insurance_expenses)}\n\n"
-           f"### 7. CHECK PRODUCTS:\n"
-           f"- Received Checks (101 - Received Checks): Credit Balance=₺{received_checks['balance_credit']:,.0f}, Debit Balance=₺{received_checks['balance_debit']:,.0f}, Credit Volume=₺   {received_checks['credit']:,.0f}, Debit Volume=₺{received_checks['debit']:,.0f}, Account Mapping={get_account_mapping(received_checks)}\n"
-           f"- Issued Checks (103 - Given Checks): Credit Balance=₺{issued_checks['balance_credit']:,.0f}, Debit Balance=₺{issued_checks['balance_debit']:,.0f}, Credit Volume=₺   {issued_checks['credit']:,.0f}, Debit Volume=₺{issued_checks['debit']:,.0f}, Account Mapping={get_account_mapping(issued_checks)}\n\n"
-           f"### 8. TRADE FINANCE & LETTER OF CREDIT:\n"
-           f"- Export Revenue (601 - Export Sales): Credit Balance=₺{export_revenue['balance_credit']:,.0f}, Debit Balance=₺{export_revenue['balance_debit']:,.0f}, Credit Volume=₺   {export_revenue['credit']:,.0f}, Debit Volume=₺{export_revenue['debit']:,.0f}, Account Mapping={get_account_mapping(export_revenue)} \n"
-           f"- Trade Finance Related Expenses (159/340): Credit Balance=₺{trade_finance_expenses['balance_credit']:,.0f}, Debit Balance=₺{trade_finance_expenses['balance_debit']:,.0f}, Credit Volume=₺{trade_finance_expenses['credit']:,.0f}, Debit Volume=₺{trade_finance_expenses['debit']:,.0f}, Account Mapping={get_account_mapping(trade_finance_expenses)} \n\n"
-           f"### 9. FX & INTERNATIONAL TRANSFERS:\n"
-           f"- FX Net Impact (646/656): Credit Balance=₺{fx_volume['balance_credit']:,.0f}, Debit Balance=₺{fx_volume['balance_debit']:,.0f}, Credit Volume=₺{fx_volume['credit']:,.0f}, Debit Volume=₺{fx_volume['debit']:,.0f}, Account Mapping={get_account_mapping(fx_volume)}\n"
-           f"- SWIFT/Transfer Expenses: Credit Balance=₺{swift_transfer_expenses['balance_credit']:,.0f}, Debit Balance=₺{swift_transfer_expenses['balance_debit']:,.0f}, Credit Volume=₺   {swift_transfer_expenses['credit']:,.0f}, Debit Volume=₺{swift_transfer_expenses['debit']:,.0f}, Account Mapping={get_account_mapping(swift_transfer_expenses)}\n\n"
-           f"### 10. PAYROLL & PERSONNEL:\n"
-           f"- Total Payroll Volume (720/730/760/770 - Labor/Personnel): Credit Balance=₺{payroll_personnel_volume['balance_credit']:,.0f}, Debit Balance=₺   {payroll_personnel_volume['balance_debit']:,.0f}, Credit Volume=₺{payroll_personnel_volume['credit']:,.0f}, Debit Volume=₺{payroll_personnel_volume['debit']:,.0f}, Account Mapping={get_account_mapping(payroll_personnel_volume)}\n\n"
-           f"### 11. SECTORAL INDICATORS:\n"
-           f"- Construction Costs (170 - Construction Costs): Credit Balance=₺{construction_costs['balance_credit']:,.0f}, Debit Balance=₺{construction_costs['balance_debit']:,.0f}, Credit Volume=₺   {construction_costs['credit']:,.0f}, Debit Volume=₺{construction_costs['debit']:,.0f}, Account Mapping={get_account_mapping(construction_costs)}\n"
-           f"- Progress Billings (350 - Progress Billings): Credit Balance=₺{progress_billings['balance_credit']:,.0f}, Debit Balance=₺{progress_billings['balance_debit']:,.0f}, Credit Volume=₺   {progress_billings['credit']:,.0f}, Debit Volume=₺{progress_billings['debit']:,.0f}, Account Mapping={get_account_mapping(progress_billings)}\n"
-           f"- Machinery & Equipment (253 - Machinery & Equipment): Credit Balance=₺{machinery_equipment['balance_credit']:,.0f}, Debit Balance=₺{machinery_equipment['balance_debit']:,.0f}, Credit    Volume=₺{machinery_equipment['credit']:,.0f}, Debit Volume=₺{machinery_equipment['debit']:,.0f}, Account Mapping={get_account_mapping(machinery_equipment)}\n"
-           f"- Commercial Goods (153 - Commercial Goods): Credit Balance=₺{commercial_goods['balance_credit']:,.0f}, Debit Balance=₺{commercial_goods['balance_debit']:,.0f}, Credit Volume=₺   {commercial_goods['credit']:,.0f}, Debit Volume=₺{commercial_goods['debit']:,.0f}, Account Mapping={get_account_mapping(commercial_goods)}\n"
-           f"- Manufacturing Overhead (730 - Manufacturing Overhead): Credit Balance=₺{manufacturing_overhead['balance_credit']:,.0f}, Debit Balance=₺{manufacturing_overhead['balance_debit']:,.0f},    Credit Volume=₺{manufacturing_overhead['credit']:,.0f}, Debit Volume=₺{manufacturing_overhead['debit']:,.0f}, Account Mapping={get_account_mapping(manufacturing_overhead)}\n\n"
-           f"### 12. FACTORING / LEASING / GUARANTEES / CASH MGMT / E-COMMERCE:\n"
-           f"- Notes Receivable (121 - Alacak Senetleri): Debit Balance=₺{notes_receivable['balance_debit']:,.0f}, Debit Volume=₺{notes_receivable['debit']:,.0f}, Account Mapping={get_account_mapping(notes_receivable)}\n"
-           f"- Leasing Payables (301/401 - Finansal Kiralama Borçları): Credit Balance=₺{leasing_payables['balance_credit']:,.0f}, Credit Volume=₺{leasing_payables['credit']:,.0f}, Account Mapping={get_account_mapping(leasing_payables)}\n"
-           f"- Guarantee Letter Commissions (760/770/780 - TEMİNAT): Debit Balance=₺{guarantee_commissions['balance_debit']:,.0f}, Debit Volume=₺{guarantee_commissions['debit']:,.0f}, Account Mapping={get_account_mapping(guarantee_commissions)}\n"
-           f"- Bank Transaction Volume (102 - Bankalar): Debit Balance=₺{bank_transaction_volume['balance_debit']:,.0f}, Debit Volume=₺{bank_transaction_volume['debit']:,.0f}, Account Mapping={get_account_mapping(bank_transaction_volume)}\n"
-           f"- E-Commerce Revenue (600/649 - E-TİCARET/ONLINE/PAZARYERİ): Credit Balance=₺{ecommerce_revenue['balance_credit']:,.0f}, Credit Volume=₺{ecommerce_revenue['credit']:,.0f}, Account Mapping={get_account_mapping(ecommerce_revenue)}\n\n"
+           "(Lines marked 'no signal' have zero volume/balance — treat them as "
+           "SECTION 2 cross-sell gaps.)\n"
+           f"{detailed_breakdown}\n"
 
            f"## OUTPUT FORMAT INSTRUCTIONS:\n"
            f"Structure your output into EXACTLY these sections:\n\n"
@@ -481,6 +525,11 @@ class ProductAnalystAgent(BaseAgent):
            product_signals, sector=sector, product_flags=db_product_flags
        )
        injection = build_few_shot_injection(classification, sector=sector)
+       # Real ING product taxonomy (ANA ÜRÜN → ALT ÜRÜN) so suggestions map
+       # to actual products: ANA ÜRÜN first, drill to ALT ÜRÜN with evidence,
+       # YP (foreign-currency) only with FX/foreign-trade signals, and
+       # respect AÇIKLAMA conditions (EXIMBANK/Reeskont/PARA TRANSFERLERİ).
+       catalog_injection = build_catalog_injection(product_signals)
        if db_metrics:
            db_meta = state.get("db_meta") or {}
            metric_line = ", ".join(f"{k}={v:,.2f}" for k, v in db_metrics.items())
@@ -490,8 +539,12 @@ class ProductAnalystAgent(BaseAgent):
                f"{metric_line}\n"
                f"Use these as the authoritative latest view when sizing opportunities."
            )
-       prompt += injection["user_addition"]
-       system_prompt = PRODUCT_ANALYST_SYSTEM_PROMPT + injection["system_addition"]
+       prompt += injection["user_addition"] + catalog_injection["user_addition"]
+       system_prompt = (
+           PRODUCT_ANALYST_SYSTEM_PROMPT
+           + injection["system_addition"]
+           + catalog_injection["system_addition"]
+       )
 
        print("product_analyst_prompt: ", prompt)
        llm_text = invoke_llm(system_prompt, prompt, temperature=0.2, max_tokens=3000)

@@ -1,0 +1,193 @@
+{
+  "metadata": {
+    "source": "ING product categorization — data/product_categories.numbers (ANA ÜRÜN / ALT ÜRÜN / AÇIKLAMA)",
+    "description": "Real ING Turkey product taxonomy used by product_analyst to ground cross-sell suggestions. Suggest at ANA ÜRÜN level first; drill into ALT ÜRÜN only when the Mizan signals give enough information (e.g. currency, import vs export). YP = foreign currency (Yabancı Para) — YP alt-products only when FX / foreign-trade evidence exists.",
+    "currency_note": "TL = Turkish Lira products; YP = foreign-currency (Yabancı Para) products."
+  },
+  "conditions": {
+    "eximbank_current_only": "Sadece güncel EXIMBANK kredisi olduğundan emin olunursa önerilebilir. (Recommend ONLY if there is concrete evidence of an existing/current EXIMBANK loan.)",
+    "reeskont_current_only": "Sadece güncel Reeskont kredisi olduğundan emin olunursa önerilebilir. (Recommend ONLY if there is concrete evidence of an existing/current TCMB Rediscount loan.)",
+    "para_transfer_indirect": "Doğrudan önerilebilecek bir ürün değildir; ancak para transfer hacmi yüksekse, nakit akışını bankaya çekmek için hesap açma ve ödemelerin bankamızdan akmasını sağlama amacıyla dolaylı öneri oluşturabilir. (Not a directly sellable product — use high transfer volume as a hook to capture the cash flow / open accounts at ING.)"
+  },
+  "categories": [
+    {
+      "ana_urun": "MEVDUATLAR",
+      "en": "Deposits",
+      "trigger_signal_keys": ["Bank Transaction Volume (102)"],
+      "few_shot_keys": ["deposit"],
+      "alt_urunler": [
+        {"name": "TL VADESİZ MEVDUAT", "currency": "TL"},
+        {"name": "YP VADESİZ MEVDUAT", "currency": "YP"},
+        {"name": "TL VADELİ MEVDUAT", "currency": "TL"},
+        {"name": "YP VADELİ MEVDUAT", "currency": "YP"},
+        {"name": "TL Turuncu", "currency": "TL"},
+        {"name": "YP Turuncu", "currency": "YP"}
+      ]
+    },
+    {
+      "ana_urun": "HAZİNE VE YATIRIM ÜRÜNLERİ",
+      "en": "Treasury & Investment Products",
+      "trigger_signal_keys": ["FX Net Impact (646/656)", "Bank Transaction Volume (102)"],
+      "few_shot_keys": ["fx"],
+      "alt_urunler": [
+        {"name": "Yatırım Fonları", "currency": "TL"},
+        {"name": "FX Swap", "currency": "YP"},
+        {"name": "FX Forward", "currency": "YP"},
+        {"name": "Opsiyon", "currency": "YP"},
+        {"name": "Spot Döviz İşlemleri", "currency": "YP"},
+        {"name": "Hazine Bonosu / Devlet Tahvili", "currency": "TL"},
+        {"name": "Eurobond", "currency": "YP"},
+        {"name": "Repo İşlemleri", "currency": "TL"}
+      ]
+    },
+    {
+      "ana_urun": "TL NAKİT KREDİLER",
+      "en": "TL Cash Loans",
+      "trigger_signal_keys": ["Bank Loans (300 + 400)", "Total Financial Expenses (780)", "Notes Receivable (121)"],
+      "few_shot_keys": ["cash_loan", "factoring"],
+      "alt_urunler": [
+        {"name": "Spot TL Nakit Krediler", "currency": "TL"},
+        {"name": "Rotatif TL Nakit Krediler", "currency": "TL"},
+        {"name": "TL İhracat Nakit Krediler", "currency": "TL"},
+        {"name": "TL İskonto Nakit Krediler", "currency": "TL"},
+        {"name": "TL İşletme Sermayesi Nakit Krediler", "currency": "TL"},
+        {"name": "TL Fatura Finansmanı Nakit Krediler", "currency": "TL"},
+        {"name": "TL Taşıt Kredisi Nakit Krediler", "currency": "TL"},
+        {"name": "TL İşyeri Kredisi Nakit Krediler", "currency": "TL"},
+        {"name": "TL EXIMBANK Nakit Krediler", "currency": "TL", "condition": "eximbank_current_only"},
+        {"name": "Çoklu Oranlı Taksitli Ticari Kredi", "currency": "TL"},
+        {"name": "TL Kullandırılan Döviz (Rotatif Döviz)", "currency": "TL"}
+      ]
+    },
+    {
+      "ana_urun": "YP NAKİT KREDİLER",
+      "en": "FX (Foreign Currency) Cash Loans",
+      "requires_fx": true,
+      "trigger_signal_keys": ["Export Revenue (601)", "FX Net Impact (646/656)", "Trade Finance Signals (159/340)"],
+      "few_shot_keys": ["trade_finance", "cash_loan"],
+      "alt_urunler": [
+        {"name": "YP İşletme Sermayesi", "currency": "YP"},
+        {"name": "YP Taşıt Kredisi", "currency": "YP"},
+        {"name": "YP İşyeri Kredisi", "currency": "YP"},
+        {"name": "Döviz Kullandırılan Döviz YP Nakit Krediler", "currency": "YP"},
+        {"name": "YP EXIMBANK", "currency": "YP", "condition": "eximbank_current_only"}
+      ]
+    },
+    {
+      "ana_urun": "TÜZEL KMH ÜRÜNLERİ",
+      "en": "Corporate Overdraft (KMH) Products",
+      "trigger_signal_keys": ["Issued Checks (103)", "DBS (Direct Debit System)", "Bank Transaction Volume (102)"],
+      "few_shot_keys": ["dbs", "cash_loan"],
+      "alt_urunler": [
+        {"name": "TÜZEL KMH", "currency": "TL"},
+        {"name": "Çekli KMH", "currency": "TL"},
+        {"name": "DBS KMH", "currency": "TL"}
+      ]
+    },
+    {
+      "ana_urun": "GAYRİNAKİT KREDİLER",
+      "en": "Non-Cash Loans",
+      "trigger_signal_keys": ["Guarantee Letter Commissions", "Construction Costs (170)", "Progress Billings (350)", "Trade Finance Signals (159/340)"],
+      "few_shot_keys": ["letter_of_guarantee", "trade_finance"],
+      "alt_urunler": [
+        {"name": "Teminat Mektubu", "currency": "TL"},
+        {"name": "Harici Garanti", "currency": "YP"},
+        {"name": "Kontrgaranti", "currency": "YP"},
+        {"name": "Niyet Mektubu", "currency": "TL"},
+        {"name": "Çek Taahhüt", "currency": "TL"},
+        {"name": "Akreditif", "currency": "YP"},
+        {"name": "TCMB Reeskont Kredisi", "currency": "TL", "condition": "reeskont_current_only"}
+      ]
+    },
+    {
+      "ana_urun": "DIŞ TİCARET",
+      "en": "Foreign Trade",
+      "requires_fx": true,
+      "trigger_signal_keys": ["Export Revenue (601)", "Trade Finance Signals (159/340)", "SWIFT/Transfer Expenses"],
+      "few_shot_keys": ["trade_finance"],
+      "alt_urunler": [
+        {"name": "İthalat - Akreditif", "currency": "YP", "trade_direction": "import"},
+        {"name": "İthalat - P/N İskontosu ile İthalatın Finansmanı", "currency": "YP", "trade_direction": "import"},
+        {"name": "İthalat - Vesaik mukabili", "currency": "YP", "trade_direction": "import"},
+        {"name": "İthalat - Mal mukabili", "currency": "YP", "trade_direction": "import"},
+        {"name": "İthalat - Peşin", "currency": "YP", "trade_direction": "import"},
+        {"name": "İhracat - Akreditif", "currency": "YP", "trade_direction": "export"},
+        {"name": "İhracat - Vesaik mukabili", "currency": "YP", "trade_direction": "export"},
+        {"name": "İhracat - Mal mukabili", "currency": "YP", "trade_direction": "export"},
+        {"name": "İhracat - Peşin", "currency": "YP", "trade_direction": "export"},
+        {"name": "İhracat - Akreditif İskontosu", "currency": "YP", "trade_direction": "export"}
+      ]
+    },
+    {
+      "ana_urun": "NAKİT YÖNETİMİ ÜRÜNLERİ",
+      "en": "Cash Management Products",
+      "trigger_signal_keys": ["Received Checks (101)", "Issued Checks (103)"],
+      "few_shot_keys": ["checks", "cash_management"],
+      "alt_urunler": [
+        {"name": "Ödeme Çekleri", "currency": "TL"},
+        {"name": "Tahsil Çekleri", "currency": "TL"},
+        {"name": "Çek Defteri", "currency": "TL"}
+      ]
+    },
+    {
+      "ana_urun": "NAKİT YÖNETİMİ ÖDEMELER",
+      "en": "Cash Management Payments",
+      "trigger_signal_keys": ["Payroll & Personnel", "Bank Transaction Volume (102)", "Supplier Finance (TFS/SCF)"],
+      "few_shot_keys": ["cash_management", "payroll", "supplier_finance"],
+      "alt_urunler": [
+        {"name": "Fatura Ödemeleri", "currency": "TL"},
+        {"name": "Kurum Ödemeleri", "currency": "TL"},
+        {"name": "TL Toplu Ödeme", "currency": "TL"},
+        {"name": "YP Toplu Ödeme", "currency": "YP"},
+        {"name": "Maaş Ödemeleri", "currency": "TL"}
+      ]
+    },
+    {
+      "ana_urun": "PARA TRANSFERLERİ",
+      "en": "Money Transfers",
+      "category_condition": "para_transfer_indirect",
+      "trigger_signal_keys": ["SWIFT/Transfer Expenses", "Bank Transaction Volume (102)"],
+      "few_shot_keys": ["cash_management"],
+      "alt_urunler": [
+        {"name": "Giden EFT / Havale", "currency": "TL"},
+        {"name": "Giden YP Transfer (Yurtiçi-Yurtdışı YP Transfer)", "currency": "YP"},
+        {"name": "Gelen EFT / Havale", "currency": "TL"},
+        {"name": "Gelen YP Transfer (Yurtiçi-Yurtdışı YP Transfer)", "currency": "YP"}
+      ]
+    },
+    {
+      "ana_urun": "KARTLAR",
+      "en": "Cards",
+      "trigger_signal_keys": ["Corporate Credit Card"],
+      "few_shot_keys": ["credit_card"],
+      "alt_urunler": [
+        {"name": "Şirket Kredi Kartları", "currency": "TL"}
+      ]
+    },
+    {
+      "ana_urun": "SİGORTALAR",
+      "en": "Insurance",
+      "trigger_signal_keys": ["Fleet Assets (254)", "Insurance Expenses (730/760/770)"],
+      "few_shot_keys": ["insurance"],
+      "alt_urunler": [
+        {"name": "Benim Arabam Kasko Sigortası", "currency": "TL"},
+        {"name": "Zorunlu Deprem (DASK) Sigortası", "currency": "TL"},
+        {"name": "Zorunlu Trafik Sigortası", "currency": "TL"},
+        {"name": "Benim İşyerim", "currency": "TL"},
+        {"name": "NAKLİYAT SİGORTASI", "currency": "TL"}
+      ]
+    },
+    {
+      "ana_urun": "ÜYE İŞ YERLERİ VE POS",
+      "en": "Merchant & POS",
+      "trigger_signal_keys": ["POS Collection (108)", "POS / Virtual POS", "E-Commerce Revenue"],
+      "few_shot_keys": ["pos", "virtual_pos"],
+      "alt_urunler": [
+        {"name": "Turuncu Kobi", "currency": "TL"},
+        {"name": "Sanal POS", "currency": "TL"},
+        {"name": "Fiziki POS", "currency": "TL"},
+        {"name": "ING Cebimde POS", "currency": "TL"}
+      ]
+    }
+  ]
+}

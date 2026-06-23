@@ -157,10 +157,19 @@ class TestLocalDB:
         snap = get_customer_snapshot("1234567890", db_path=tmp_db)
         assert snap["found"] is True
         assert snap["matched_by"] == "tax_id"
-        assert snap["financial_metrics"]["acid_test_ratio"] == 0.95
+        # Long-format metrics keyed by ENGLISH description in the snapshot
+        assert snap["financial_metrics"]["Acid-Test Ratio (Quick Ratio)"] == 0.95
+        assert snap["financial_metrics"]["Current Ratio"] == 1.40
+        # Whitespace-tolerant mapping: 'Nakit  Döngüsü (Gün)' (double space)
+        # and 'Toplam Net Borç / VAFÖK ' (trailing space) must map cleanly
+        assert snap["financial_metrics"]["Cash Conversion Cycle (Days)"] == 74
+        assert snap["financial_metrics"]["Total Net Debt / EBITDA"] == 2.1
         assert snap["product_flags"]["pos"] == 1
         assert snap["product_flags"]["credit_card"] == 0
-        assert not snap["financials_df"].empty
+        # LONG DataFrame with both TR and EN description columns
+        df = snap["financials_df"]
+        assert not df.empty
+        assert {"tr_description", "value", "en_description"} <= set(df.columns)
 
     def test_company_name_fallback(self, tmp_db):
         from local_db import seed_demo_data, get_customer_snapshot
@@ -177,6 +186,35 @@ class TestLocalDB:
         assert snap["found"] is False
         assert snap["financial_metrics"] == {}
         assert snap["product_flags"] == {}
+
+    def test_unmapped_tr_description_falls_back_to_turkish(self):
+        import pandas as pd
+        from local_db import add_english_descriptions
+        df = pd.DataFrame({
+            "tr_description": ["Cari Oran", "Bilinmeyen Yeni Metrik"],
+            "value": [1.4, 9.9],
+        })
+        out = add_english_descriptions(df)
+        assert out.loc[0, "en_description"] == "Current Ratio"
+        assert out.loc[1, "en_description"] == "Bilinmeyen Yeni Metrik"  # TR kept
+
+    def test_legacy_wide_schema_migrated_to_long(self, tmp_db):
+        import sqlite3
+        from local_db import get_connection
+        # Simulate a pre-existing DB with the old WIDE schema
+        conn = sqlite3.connect(str(tmp_db))
+        conn.execute(
+            "CREATE TABLE customer_financials ("
+            "tax_id TEXT, company_name TEXT, period TEXT, "
+            "acid_test_ratio REAL, gross_profit REAL)"
+        )
+        conn.commit()
+        conn.close()
+        conn = get_connection(tmp_db)  # migration fires here
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(customer_financials)")}
+        conn.close()
+        assert "tr_description" in cols and "value" in cols
+        assert "acid_test_ratio" not in cols
 
     def test_nace_code_roundtrip(self, tmp_db):
         from local_db import seed_demo_data, get_customer_snapshot
@@ -197,7 +235,97 @@ class TestLocalDB:
         out = db_enrichment_agent({"tax_id": "1234567890", "company_name": "X"})
         assert out["db_meta"]["found"] is True
         assert out["db_product_flags"]["pos"] == 1
-        assert "acid_test_ratio" in out["db_financial_metrics"]
+        assert "Acid-Test Ratio (Quick Ratio)" in out["db_financial_metrics"]
+
+
+# ============================================================================
+# Oracle EDW backend (mocked — no real warehouse needed)
+# ============================================================================
+
+class TestOracleBackend:
+    @pytest.fixture
+    def oracle_env(self, monkeypatch):
+        monkeypatch.setenv("CUSTOMER_DB_BACKEND", "oracle")
+
+    def _long_fin_df(self):
+        import pandas as pd
+        return pd.DataFrame({
+            "tax_id": ["999"] * 2, "company_name": ["EDW CO"] * 2,
+            "period": ["202606"] * 2,
+            "tr_description": ["Asit Test Oranı", "Cari Oran"],
+            "value": [0.9, 1.3],
+        })
+
+    def test_backend_selection_via_env(self, oracle_env):
+        from local_db import get_backend
+        assert get_backend() == "oracle"
+
+    def test_read_oracle_lowercases_columns(self, oracle_env, monkeypatch):
+        """Oracle returns UPPERCASE identifiers; _read_oracle must normalize."""
+        import pandas as pd
+        import local_db
+        from unittest.mock import MagicMock
+        fake_engine = MagicMock()
+        fake_engine.connect.return_value.__enter__ = MagicMock(return_value="conn")
+        fake_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        monkeypatch.setattr(local_db, "_get_oracle_engine", lambda: fake_engine)
+        upper_df = pd.DataFrame({"TR_DESCRIPTION": ["Cari Oran"], "VALUE": [1.3]})
+        monkeypatch.setattr(pd, "read_sql", lambda *a, **k: upper_df)
+        out = local_db._read_oracle("SELECT 1")
+        assert list(out.columns) == ["tr_description", "value"]
+
+    def test_financials_df_routed_through_oracle(self, oracle_env, monkeypatch):
+        import local_db
+        captured = {}
+        def fake_read(query, params=None):
+            captured["query"], captured["params"] = query, params
+            return self._long_fin_df()
+        monkeypatch.setattr(local_db, "_read_oracle", fake_read)
+        df = local_db.get_financials_df("999")
+        assert "CUSTOMER_FINANCIALS" in captured["query"]
+        assert captured["params"] == {"tax_id": "999"}
+        assert "en_description" in df.columns          # TR→EN preprocessing applied
+        assert "Current Ratio" in set(df["en_description"])
+
+    def test_oracle_failure_returns_empty_no_demo_fallback(self, oracle_env, monkeypatch):
+        import local_db
+        def boom(query, params=None):
+            raise RuntimeError("EDW unreachable")
+        monkeypatch.setattr(local_db, "_read_oracle", boom)
+        assert local_db.get_financials_df("999").empty
+        assert local_db.get_product_flags_df("999").empty
+        snap = local_db.get_customer_snapshot("999", company_name="EDW CO")
+        assert snap["found"] is False
+        assert snap["financial_metrics"] == {}
+
+    def test_snapshot_from_oracle(self, oracle_env, monkeypatch):
+        import pandas as pd
+        import local_db
+        prod_df = pd.DataFrame([{"tax_id": "999", "company_name": "EDW CO",
+                                 "nace_code": "47.11.01", "pos": 1, "checks": 0}])
+        def fake_read(query, params=None):
+            return self._long_fin_df() if "FINANCIALS" in query else prod_df
+        monkeypatch.setattr(local_db, "_read_oracle", fake_read)
+        snap = local_db.get_customer_snapshot("999")
+        assert snap["found"] is True and snap["matched_by"] == "tax_id"
+        assert snap["financial_metrics"]["Acid-Test Ratio (Quick Ratio)"] == 0.9
+        assert snap["product_flags"]["pos"] == 1
+        assert snap["nace_code"] == "47.11.01"
+
+    def test_oracle_backend_is_read_only(self, oracle_env):
+        from local_db import upsert_financials, upsert_product_flags, seed_demo_data
+        with pytest.raises(NotImplementedError):
+            upsert_financials("x", "202606", {"Cari Oran": 1.0})
+        with pytest.raises(NotImplementedError):
+            upsert_product_flags("x", {"pos": 1})
+        with pytest.raises(NotImplementedError):
+            seed_demo_data()
+
+    def test_ensure_db_noop_on_oracle(self, oracle_env, tmp_path):
+        from local_db import ensure_db
+        target = tmp_path / "should_not_exist.sqlite"
+        ensure_db(db_path=target)
+        assert not target.exists()   # no sqlite bootstrap on EDW backend
 
 
 # ============================================================================
@@ -348,6 +476,164 @@ class TestRecommendationCatalog:
 
 
 # ============================================================================
+# ING Product Catalog (ANA ÜRÜN / ALT ÜRÜN grounded suggestions)
+# ============================================================================
+
+class TestProductCatalog:
+    def test_catalog_integrity(self):
+        """13 ANA ÜRÜN, 72 ALT ÜRÜN, conditions resolvable, currencies valid."""
+        from agents.product_catalog import load_product_catalog
+        cat = load_product_catalog()
+        assert len(cat["categories"]) == 13
+        assert sum(len(c["alt_urunler"]) for c in cat["categories"]) == 72
+        cond_keys = set(cat["conditions"])
+        for c in cat["categories"]:
+            if c.get("category_condition"):
+                assert c["category_condition"] in cond_keys
+            for alt in c["alt_urunler"]:
+                assert alt["currency"] in ("TL", "YP")
+                if alt.get("condition"):
+                    assert alt["condition"] in cond_keys
+
+    def test_trigger_keys_are_real_product_signals(self):
+        """Every catalog trigger key must be produced by ProductAnalystAgent."""
+        import builtins
+        from unittest.mock import patch
+        from mock_data import get_mizan_df
+        from agents.data_ingestion import data_ingestion_agent
+        from agents.product_catalog import load_product_catalog
+
+        state = {"tax_id": "x", "company_name": "T", "sector": "General",
+                 "mizan_data": get_mizan_df().to_dict(orient="records"),
+                 "retry_count": 0, "agent_metrics": {},
+                 "execution_timeline": [], "error_log": []}
+        state.update(data_ingestion_agent(state))
+        real_print = builtins.print
+        builtins.print = lambda *a, **k: None
+        try:
+            with patch("agents.product_analyst.invoke_llm", return_value="MOCK"):
+                from agents.product_analyst import product_analyst_agent
+                out = product_analyst_agent(state)
+        finally:
+            builtins.print = real_print
+        produced = set(out["product_signals"].keys())
+        for c in load_product_catalog()["categories"]:
+            unknown = [k for k in c["trigger_signal_keys"] if k not in produced]
+            assert not unknown, f"{c['ana_urun']} has unknown triggers: {unknown}"
+
+    def test_fx_gating_present(self):
+        from agents.product_catalog import build_catalog_injection
+        inj = build_catalog_injection({
+            "Export Revenue (601)": {"volume": 5e7, "balance": 0},
+            "Bank Loans (300 + 400)": {"volume": 9e7, "balance": 3.5e7},
+        })
+        assert "is PRESENT" in inj["system_addition"]
+        assert "DIŞ TİCARET" in inj["user_addition"]        # export → foreign trade active
+        # depth rule present
+        assert "ANA ÜRÜN (main product) level FIRST" in inj["system_addition"]
+
+    def test_fx_gating_absent(self):
+        from agents.product_catalog import build_catalog_injection
+        inj = build_catalog_injection({"POS Collection (108)": {"volume": 8e7, "balance": 2e6}})
+        assert "is ABSENT" in inj["system_addition"]
+        active_block = inj["user_addition"].split("CROSS-SELL")[0]
+        assert "ÜYE İŞ YERLERİ VE POS" in active_block       # POS active
+        assert "DIŞ TİCARET" not in active_block             # foreign trade NOT active
+        assert "DIŞ TİCARET" in inj["user_addition"]         # but listed as cross-sell
+
+    def test_conditions_surface_when_relevant(self):
+        from agents.product_catalog import build_catalog_injection
+        inj = build_catalog_injection({
+            "Bank Loans (300 + 400)": {"volume": 9e7, "balance": 3.5e7},
+            "Total Financial Expenses (780)": {"volume": 9e6, "balance": 0},
+            "Guarantee Letter Commissions": {"volume": 2e6, "balance": 0},
+        })
+        # EXIMBANK (TL loans) + Reeskont (non-cash) conditions must appear
+        assert "eximbank_current_only" in inj["user_addition"]
+        assert "reeskont_current_only" in inj["user_addition"]
+        assert "AÇIKLAMA CONDITIONS" in inj["user_addition"]
+
+    def test_empty_signals_no_injection(self):
+        from agents.product_catalog import build_catalog_injection
+        inj = build_catalog_injection({})
+        assert "CROSS-SELL CATALOG" in inj["user_addition"]   # all inactive, listed as cross-sell
+        assert "is ABSENT" in inj["system_addition"]
+
+    def test_catalog_is_not_a_hard_limit(self):
+        """The catalog grounds naming but must NOT cap recommendations —
+        signal/few-shot products beyond it (payroll, leasing, factoring)
+        stay allowed, and the old 'do not invent outside catalog' rule is gone."""
+        from agents.product_catalog import build_catalog_injection
+        inj = build_catalog_injection({"Payroll & Personnel": {"volume": 1.5e7, "balance": 0}})
+        sys = inj["system_addition"]
+        user = inj["user_addition"]
+        assert "Do NOT invent products outside this catalog" not in sys
+        assert "not an exhaustive" in user.lower() or "NOT limited to this list" in user
+        assert "BEYOND THE CATALOG" in sys
+        assert "Payroll package" in sys          # explicit cross-sector example
+        # anti-hallucination intent preserved
+        assert "ANTI-HALLUCINATION" in sys
+
+    def test_zero_signals_compacted_active_kept(self):
+        """Zero-signal breakdown lines collapse to 'no signal' (token saving)
+        while active lines keep their full 5-column detail and account map."""
+        from unittest.mock import patch
+        from agents.product_analyst import ProductAnalystAgent
+        rows = [
+            {"account_code": "108", "account_name": "Diğer Hazır Değerler",
+             "debit": 85_000_000, "credit": 0, "balance_debit": 2_000_000, "balance_credit": 0},
+            {"account_code": "600", "account_name": "Yurtiçi Satışlar",
+             "debit": 0, "credit": 90_000_000, "balance_debit": 0, "balance_credit": 90_000_000},
+        ]
+        state = {"tax_id": "x", "company_name": "Sparse Co", "sector": "Retail",
+                 "standardized_mizan": rows, "retry_count": 0,
+                 "db_product_flags": {}, "db_financial_metrics": {},
+                 "agent_metrics": {}, "execution_timeline": [], "error_log": []}
+        cap = {}
+        with patch("agents.product_analyst.invoke_llm",
+                   side_effect=lambda s, u, **k: cap.update(user=u) or "MOCK"), \
+             patch("builtins.print", lambda *a, **k: None):
+            out = ProductAnalystAgent()(state)
+        assert out["agent_metrics"]["product_analyst"]["status"] == "success"
+        u = cap["user"]
+        # Many gaps collapsed to a single compact line each
+        assert u.count("no signal (potential cross-sell gap)") >= 10
+        # The active POS Collection (108) line keeps full detail
+        pos_line = next(l for l in u.splitlines() if l.startswith("- POS Collection (108"))
+        assert "Account Mapping=" in pos_line and "no signal" not in pos_line
+        # Compaction must materially shrink the breakdown vs a full dump
+        assert "Debit Volume=₺" in u  # active lines still present
+        assert u.count("Account Mapping=") <= 3  # only the genuinely active ones
+
+    def test_product_analyst_prompt_carries_catalog(self):
+        import builtins
+        from unittest.mock import patch
+        from mock_data import get_mizan_df
+        from agents.data_ingestion import data_ingestion_agent
+
+        state = {"tax_id": "x", "company_name": "T", "sector": "Trading",
+                 "mizan_data": get_mizan_df().to_dict(orient="records"),
+                 "retry_count": 0, "db_product_flags": {}, "db_financial_metrics": {},
+                 "agent_metrics": {}, "execution_timeline": [], "error_log": []}
+        state.update(data_ingestion_agent(state))
+        cap = {}
+        def fake_llm(system_prompt, user_prompt, **kw):
+            cap["system"], cap["user"] = system_prompt, user_prompt
+            return "MOCK"
+        real_print = builtins.print
+        builtins.print = lambda *a, **k: None
+        try:
+            with patch("agents.product_analyst.invoke_llm", side_effect=fake_llm):
+                from agents.product_analyst import product_analyst_agent
+                product_analyst_agent(state)
+        finally:
+            builtins.print = real_print
+        assert "ING PRODUCT CATALOG" in cap["user"]
+        assert "PRODUCT-CATALOG SUGGESTION POLICY" in cap["system"]
+        assert "YP means foreign currency" in cap["system"]
+
+
+# ============================================================================
 # NACE code mapping + DB-based sector verification
 # ============================================================================
 
@@ -437,6 +723,12 @@ class TestNaceSectorVerification:
 # ============================================================================
 
 class TestSectorAnalysis:
+    @pytest.fixture(autouse=True)
+    def _force_enabled(self, monkeypatch):
+        # These tests exercise the comparison logic itself, so force the
+        # (optional) sector analysis ON regardless of benchmark freshness.
+        monkeypatch.setenv("ENABLE_SECTOR_ANALYSIS", "1")
+
     def test_sector_matching_en_tr(self):
         from sector_analysis import match_sector
         assert match_sector("Textile") == "Textile"
@@ -502,3 +794,123 @@ class TestSectorAnalysis:
         cmp = compare_company_to_sector({}, "Retail")
         assert cmp["rows"] == []
         assert "No comparable benchmark" in cmp["markdown"]
+
+    def test_ratio_bindings_aligned_with_local_db_metrics(self):
+        """Every DB metric name in _RATIO_BINDINGS must exist in
+        local_db.TR_EN_METRIC_MAP (the EN names the snapshot produces)."""
+        from sector_analysis import _RATIO_BINDINGS
+        from local_db import TR_EN_METRIC_MAP
+        en_names = set(TR_EN_METRIC_MAP.values())
+        for bench_key, ratio_key, db_metric_en, unit, direction in _RATIO_BINDINGS:
+            if db_metric_en is not None:
+                assert db_metric_en in en_names, (
+                    f"binding '{bench_key}' references unknown DB metric "
+                    f"'{db_metric_en}'"
+                )
+            # every binding needs at least one company-value source
+            assert ratio_key or db_metric_en
+
+    def test_db_metrics_fill_mizan_gaps(self):
+        """Net margin & leverage have no Mizan ratio — DB must fill them."""
+        from sector_analysis import compare_company_to_sector
+        ratios = {"current_ratio": {"value": 1.2}}
+        db_metrics = {
+            "Net Profit Margin (%)": 5.4,
+            "Total Liabilities / Total Assets": 0.70,  # EDW stores ratios → ×100
+            "Current Ratio": 1.9,  # must NOT override the Mizan value
+        }
+        cmp = compare_company_to_sector(ratios, "Manufacturing", db_metrics=db_metrics)
+        by_metric = {r["metric"]: r for r in cmp["rows"]}
+        # Mizan wins when both sources exist
+        cur = by_metric["current_ratio"]
+        assert cur["company"] == 1.2 and cur["source"] == "mizan"
+        # DB-only metrics appear with bank_db source
+        net = by_metric["Net Profit Margin (%)"]
+        assert net["company"] == 5.4 and net["source"] == "bank_db"
+        lev = by_metric["Total Liabilities / Total Assets"]
+        assert lev["company"] == 70.0 and lev["source"] == "bank_db"
+        assert "Bank DB (latest)" in cmp["markdown"]
+
+    def test_db_ratio_metrics_fixed_scale(self):
+        """EDW convention (confirmed): non-'(%)' ratio metrics are stored
+        as plain ratios (0.72) → fixed ×100; '(%)' metrics are untouched."""
+        from sector_analysis import compare_company_to_sector
+        cmp = compare_company_to_sector(
+            {}, "Manufacturing",
+            db_metrics={
+                "Total Liabilities / Total Assets": 0.72,
+                "Total Financial Debt / Total Liabilities": 0.34,
+                "Net Profit Margin (%)": 7.5,   # already a percent — no scaling
+            },
+        )
+        by_metric = {r["metric"]: r for r in cmp["rows"]}
+        assert by_metric["Total Liabilities / Total Assets"]["company"] == 72.0
+        assert by_metric["Total Financial Debt / Total Liabilities"]["company"] == 34.0
+        assert by_metric["Net Profit Margin (%)"]["company"] == 7.5
+        # Deterministic — NOT threshold-based: a ratio metric is always
+        # scaled, even when its raw value exceeds the old 1.5 heuristic cutoff
+        cmp2 = compare_company_to_sector(
+            {}, "Manufacturing",
+            db_metrics={"Total Liabilities / Total Assets": 1.8},  # leveraged firm
+        )
+        lev2 = next(r for r in cmp2["rows"]
+                    if r["metric"] == "Total Liabilities / Total Assets")
+        assert lev2["company"] == 180.0
+
+
+class TestSectorAnalysisOptional:
+    """Sector analysis is OPTIONAL — gated by ENABLE_SECTOR_ANALYSIS so a
+    stale benchmark JSON can be skipped without code changes."""
+
+    def test_force_disabled(self, monkeypatch):
+        monkeypatch.setenv("ENABLE_SECTOR_ANALYSIS", "0")
+        from sector_analysis import is_sector_analysis_enabled, compare_company_to_sector
+        assert is_sector_analysis_enabled() is False
+        cmp = compare_company_to_sector({"current_ratio": {"value": 1.2}}, "Manufacturing")
+        assert cmp["enabled"] is False
+        assert cmp["rows"] == [] and cmp["markdown"] == ""
+
+    def test_force_enabled(self, monkeypatch):
+        monkeypatch.setenv("ENABLE_SECTOR_ANALYSIS", "1")
+        from sector_analysis import is_sector_analysis_enabled, compare_company_to_sector
+        assert is_sector_analysis_enabled() is True
+        cmp = compare_company_to_sector({"current_ratio": {"value": 1.2}}, "Manufacturing")
+        assert cmp["enabled"] is True and cmp["rows"]
+
+    def test_auto_follows_benchmark_freshness(self, monkeypatch):
+        monkeypatch.setenv("ENABLE_SECTOR_ANALYSIS", "auto")
+        import sector_analysis as sa
+        # auto + stale data (needs_refresh=true) -> disabled
+        monkeypatch.setattr(sa, "load_benchmarks",
+                            lambda *a, **k: {"metadata": {"needs_refresh": True}})
+        assert sa.is_sector_analysis_enabled() is False
+        # auto + fresh data -> enabled
+        monkeypatch.setattr(sa, "load_benchmarks",
+                            lambda *a, **k: {"metadata": {"needs_refresh": False}})
+        assert sa.is_sector_analysis_enabled() is True
+
+    def test_strategist_omits_section_when_disabled(self, monkeypatch):
+        monkeypatch.setenv("ENABLE_SECTOR_ANALYSIS", "0")
+        import builtins
+        from unittest.mock import patch
+        state = {
+            "tax_id": "x", "company_name": "Test Co", "sector": "Manufacturing",
+            "financial_ratios": {"current_ratio": {"value": 1.1}, "donem_context": {}},
+            "network_data": {"stats": {}, "nodes": []},
+            "product_signals": {"POS Collection (108)": {"volume": 8e7, "balance": 2e6}},
+            "db_product_flags": {}, "db_financial_metrics": {},
+        }
+        cap = {}
+        def fake_llm(system_prompt, user_prompt, **kw):
+            cap["user"] = user_prompt
+            return "MOCK"
+        real_print = builtins.print
+        builtins.print = lambda *a, **k: None
+        try:
+            with patch("agents.strategist.invoke_llm", side_effect=fake_llm):
+                from agents.strategist import sales_strategist_agent
+                out = sales_strategist_agent(state)
+        finally:
+            builtins.print = real_print
+        assert out["agent_metrics"]["strategist"]["status"] == "success"
+        assert "TCMB SECTOR BENCHMARK COMPARISON" not in cap["user"]

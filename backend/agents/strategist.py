@@ -197,8 +197,20 @@ class SalesStrategistAgent(BaseAgent):
         )
 
         # ── TCMB SECTOR BENCHMARK (sector_analysis foundation) ──
-        sector_comparison = compare_company_to_sector(ratios, sector)
-        if sector_comparison.get("is_fallback"):
+        # Mizan-derived ratios are the primary source; bank-DB metrics
+        # (local_db en_description keys) fill the gaps (net margin, leverage).
+        sector_comparison = compare_company_to_sector(
+            ratios, sector, db_metrics=state.get("db_financial_metrics") or {}
+        )
+        sector_enabled = sector_comparison.get("enabled", True)
+        if not sector_enabled:
+            # OPTIONAL: TCMB benchmark data is stale/disabled — the report
+            # is produced without the sector-comparison section.
+            logger.info(
+                f"📐 Sector benchmark section omitted for '{company_name}' "
+                f"(sector analysis disabled / benchmark data not current)."
+            )
+        elif sector_comparison.get("is_fallback"):
             # FALLBACK PATH: sector prediction absent or not in the TCMB
             # benchmark set — the report is generated without sector info.
             logger.warning(
@@ -212,6 +224,13 @@ class SalesStrategistAgent(BaseAgent):
                 f"(secondary: {sector_comparison['secondary_sectors'] or '—'}, "
                 f"modifiers: {sector_comparison['modifiers'] or '—'})"
             )
+        # Only inject the benchmark section when sector analysis is enabled
+        sector_block = (
+            f"{sector_comparison['markdown']}\n"
+            f"Use this TCMB sector benchmark to contextualize the company's financial health "
+            f"(better/worse than sector) and to sharpen sector-driven product prioritization "
+            f"in Sections 1, 3 and 6.\n\n"
+        ) if sector_enabled and sector_comparison.get("markdown") else ""
 
         # ── SELECTIVE FEW-SHOT INJECTION + CURRENT-USAGE EXCLUSION ──
         # Same classifier as product_analyst: only scenarios with detected
@@ -257,10 +276,7 @@ class SalesStrategistAgent(BaseAgent):
             f"### 📦 PRODUCT SIGNALS & SECTOR\n"
             f"**Sector:** {sector} (Prioritize sector-relevant products)\n"
             f"**Product Analyst Intelligence:**\n{str(product_interp)}\n\n"
-            f"{sector_comparison['markdown']}\n"
-            f"Use this TCMB sector benchmark to contextualize the company's financial health "
-            f"(better/worse than sector) and to sharpen sector-driven product prioritization "
-            f"in Sections 1, 3 and 6.\n\n"
+            f"{sector_block}"
             f"**Compressed Strategist Payload (JSON):**\n```json\n{strategist_payload}\n```\n\n"
             f"### 🔍 QUANT ANALYST INTELLIGENCE\n"
             f"{str(quant_interp)}\n\n"
